@@ -80,10 +80,10 @@ class AgentState:
 
 				self.history.append(last_trick)
 
-			current_trick = []
+			self.current = []
 			for player, cards in zip(count(req['history'][3]), req['history'][1]):
 				cards = [id_to_card(id, self.level) for id in cards]
-				current_trick.append((self.get_id(player)), cards)
+				self.current.append((self.get_id(player), cards))
 
 			# process current_trick
 

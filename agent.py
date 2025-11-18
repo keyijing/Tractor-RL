@@ -33,7 +33,8 @@ class Agent:
 
 		elif state.stage == Stage.PLAY:
 			if self.play is None:
-				leading = state.current[0] if state.current else []
+				leading = state.current[0][1] if state.current else []
+				# print(f'{leading=}')
 				self.play = PlayState(state.level, state.major, state.hand, leading)
 
 			mask = np.zeros(110, dtype=bool)
@@ -56,6 +57,7 @@ class Agent:
 
 		elif stage == Stage.PLAY:
 			if tok == self.play.eos_tok:
+				self.play = None
 				return None
 			else:
 				return self.play.tok_to_ids(tok)

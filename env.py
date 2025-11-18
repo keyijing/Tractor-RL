@@ -1,40 +1,46 @@
 from state import Stage
 from agent import Agent
 from policy import random_policy
-from judger import main
+import judger
 import json
+from copy import deepcopy
+from importlib import reload
 
 class Env:
 	def __init__(self):
 		self.players = [Agent() for _ in range(4)]
-		self.logs = {'log': []}
+		self.log = []
+		self.initdata = None
 
 	def step(self):
-		output = main(self.logs)
+		logs = {'log': deepcopy(self.log)}
+		if self.initdata is not None:
+			logs['initdata'] = deepcopy(self.initdata)
+		reload(judger)
+		output = judger.main(logs)
 		if output['command'] != 'request':
 			print(output)
 			return True
 
 		if 'initdata' in output:
-			initdata = output.pop('initdata')
-			self.logs['initdata'] = initdata
-			print(json.dumps({'initdata': initdata}))
-		self.logs['log'].append({'output': output})
+			self.initdata = output.pop('initdata')
+			# print(json.dumps({'initdata': self.initdata}))
+		self.log.append({'output': output})
 
 		content = output['content']
-		print(json.dumps(content))
+		# print(json.dumps(content))
 
 		player_id, request = next(iter(content.items()))
 		player = self.players[int(player_id)]
 		stage = request['stage']
 		player.observe(request)
-		print(player.state.hand)
+		# print(player.state.hand)
 
 		if stage == 'deal':
 			stage, mask = player.obs()
 			assert stage == Stage.DEAL
 
-			tok = random_policy(mask)
+			tok = random_policy(Stage.DEAL, mask)
 			ids =  player.tok_to_ids(tok)
 
 		elif stage == 'cover':
@@ -43,10 +49,10 @@ class Env:
 				stage, mask = player.obs()
 				assert stage == Stage.COVER
 
-				tok = random_policy(mask)
+				tok = random_policy(Stage.COVER, mask)
 				ids += player.tok_to_ids(tok)
 
-			print(ids)
+			# print(ids)
 			for id in ids:
 				player.state.hand.remove(id)
 
@@ -56,13 +62,13 @@ class Env:
 				stage, mask = player.obs()
 				assert stage == Stage.PLAY
 
-				tok = random_policy(mask)
+				tok = random_policy(Stage.PLAY, mask)
 				new_ids = player.tok_to_ids(tok)
 				if new_ids is None:
 					break
 				else:
 					ids += new_ids
-					print(new_ids)
+					# print(new_ids)
 
 		else:
 			raise NotImplementedError(f"{stage}: unknown stage")
@@ -70,13 +76,14 @@ class Env:
 		response = {
 			player_id: {'response': ids}
 		}
-		print(json.dumps(response))
-		self.logs['log'].append(response)
+		# print(json.dumps(response))
+		self.log.append(response)
 		return False
 
 if __name__ == '__main__':
-	env = Env()
 	while True:
-		done = env.step()
-		if done:
-			break
+		env = Env()
+		while True:
+			done = env.step()
+			if done:
+				break

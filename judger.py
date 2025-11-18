@@ -245,12 +245,14 @@ def checkThrow(poker, own, currplayer, level, major, check=False):
 		if list(count.keys())[0] in Major: # 如果是主牌甩牌
 			for p in count.keys():
 				if p not in Major:
-					setError(currplayer, "INVALID_POKERTYPE")
+					print(count)
+					setError(currplayer, "INVALID_POKERTYPE [1]")
 		else: # 是副牌
 			suit = list(count.keys())[0][0] # 花色相同
 			for k in count.keys():
 				if k[0] != suit:
-					setError(currplayer, "INVALID_POKERTYPE")
+					print(count)
+					setError(currplayer, "INVALID_POKERTYPE [2]")
 	# 优先检查整牌型（拖拉机）
 	pos = []
 	tractor = []
@@ -362,10 +364,10 @@ def checkBanker(repo, level, currplayer, banking, first_round):
 	newbanking = banking
 	if len(repo) == 1: # 单张报主
 		if banking["called"] != -1: # 已报过主
-			setError(currplayer, "ILLEGAL_MOVE")
+			setError(currplayer, "ILLEGAL_MOVE [1]")
 		poker = num2Poker(repo[0])
 		if poker[1] != level: # 不是级牌
-			setError(currplayer, "ILLEGAL_MOVE")
+			setError(currplayer, "ILLEGAL_MOVE [2]")
 		newbanking["called"] = currplayer
 		newbanking["major"] = poker[0]
 		if first_round:
@@ -373,10 +375,10 @@ def checkBanker(repo, level, currplayer, banking, first_round):
 		return newbanking
 	if len(repo) == 2: # 对子反主
 		if banking["called"] == -1 or banking["snatched"] != -1: # 还未报主或已经反主
-			setError(currplayer, "ILLEGAL_MOVE")
+			setError(currplayer, "ILLEGAL_MOVE [3]")
 		poker = [num2Poker(repo[0]), num2Poker(repo[1])]
 		if poker[0] != poker[1]: # 不是对子
-			setError(currplayer, "ILLEGAL_MOVE")
+			setError(currplayer, "ILLEGAL_MOVE [4]")
 		if poker[0][1] != level: # 不是级牌
 			if poker[0] == "jo" or poker[0] == "Jo": # 是大小王
 				newbanking["snatched"] = currplayer
@@ -384,7 +386,7 @@ def checkBanker(repo, level, currplayer, banking, first_round):
 				if first_round:
 					newbanking["banker"] = currplayer
 				return newbanking
-			setError(currplayer, "ILLEGAL_MOVE")
+			setError(currplayer, "ILLEGAL_MOVE [5]")
 		newbanking["snatched"] = currplayer
 		newbanking["major"] = poker[0][0]
 		if first_round:
@@ -493,7 +495,7 @@ def checkLegalMove(poker, level, major, currplayer, history, own, banker): # own
 	else:
 		tyfirst = checkPokerType(history[0], currplayer,level)
 		if len(poker) != len(history[0]):
-			setError(currplayer, "ILLEGAL_MOVE")
+			setError(currplayer, "ILLEGAL_MOVE [6]")
 		if tyfirst == "suspect": # 这里own不一样了，但是可以不需要check
 			outhis, ilcnt = checkThrow(history[0], own, currplayer, level, major, check=False)
 			# 甩牌不可能失败，因此只存在主牌毙或者贴牌的情形，且不可能有应手
@@ -505,7 +507,7 @@ def checkLegalMove(poker, level, major, currplayer, history, own, banker): # own
 				if len(major_pok) != len(poker): # 这种情况下，同花(主牌)必须已经贴完
 					major_hold = [p for p in own_pok if p in Major]
 					if len(major_pok) != len(major_hold):
-						setError(currplayer, "ILLEGAL_MOVE")
+						setError(currplayer, "ILLEGAL_MOVE [7]")
 				else: #全是主牌
 					outhis.sort(key=lambda x: len(x), reverse=True) # 牌型从大到小来看
 					major_hold = [p for p in own_pok if p in Major]
@@ -534,20 +536,20 @@ def checkLegalMove(poker, level, major, currplayer, history, own, banker): # own
 									res_ex = False
 									break
 							if res_ex: # 存在应手，说明贴牌不当
-								setError(currplayer, "ILLEGAL_MOVE")
+								setError(currplayer, "ILLEGAL_MOVE [8]")
 							else: # 存在应手，继续检查
 								pair_own = sum([len(x) for x in own_divide if len(x) >= 2])
 								pair_his = sum([len(x) for x in outhis if len(x) >= 2])
 								pair_pok = sum([len(x) for x in divider if len(x) >= 2])
 								if pair_pok < min(pair_own, pair_his):
-									setError(currplayer, "ILLEGAL_MOVE")
+									setError(currplayer, "ILLEGAL_MOVE [9]")
 			else:
 				suit = hist[0][0][0]
 				suit_pok = [p for p in pok if p not in Major and p[0] == suit]
 				if len(suit_pok) != len(poker): # 这种情况下，同花(主牌)必须已经贴完
 					suit_hold = [p for p in own_pok if p not in Major and p[0] == suit]
 					if len(suit_pok) != len(suit_hold):
-						setError(currplayer, "ILLEGAL_MOVE")
+						setError(currplayer, "ILLEGAL_MOVE [10]")
 				else: 
 					outhis.sort(key=lambda x: len(x), reverse=True) # 牌型从大到小来看
 					suit_hold = [p for p in own_pok if p not in Major and p[0] == suit]
@@ -576,24 +578,24 @@ def checkLegalMove(poker, level, major, currplayer, history, own, banker): # own
 									res_ex = False
 									break
 							if res_ex: # 存在应手，说明贴牌不当
-								setError(currplayer, "ILLEGAL_MOVE")
+								setError(currplayer, "ILLEGAL_MOVE [11]")
 							else: # 存在应手，继续检查
 								pair_own = sum([len(x) for x in own_divide if len(x) >= 2])
 								pair_his = sum([len(x) for x in outhis if len(x) >= 2])
 								pair_pok = sum([len(x) for x in divider if len(x) >= 2])
 								if pair_pok < min(pair_own, pair_his):
-									setError(currplayer, "ILLEGAL_MOVE")
+									setError(currplayer, "ILLEGAL_MOVE [12]")
 						# 到这里关于甩牌贴牌的问题基本上解决，是否存在反例还有待更详细的讨论
 
 		else: # 常规牌型
 		# 该情形下的非法行动：(1) 有可以应手的牌型但贴牌或用主牌毙 (2) 贴牌不当(有同花不贴/拖拉机有对子不贴)
 			if checkRes(history[0], own[currplayer], level): #(1) 有应手但贴牌或毙
 				if checkPokerType(poker, currplayer, level) != tyfirst:
-					setError(currplayer,"ILLEGAL_MOVE")
+					setError(currplayer,"ILLEGAL_MOVE [13]")
 				if hist[0][0] in Major and pok[0] not in Major:
-					setError(currplayer,"ILLEGAL_MOVE")
+					setError(currplayer,"ILLEGAL_MOVE [14]")
 				if hist[0][0] not in Major and (pok[0] in Major or pok[0][0] != hist[0][0][0]):
-					setError(currplayer, "ILLEGAL_MOVE") 
+					setError(currplayer, "ILLEGAL_MOVE [15]") 
 			elif checkPokerType(poker, currplayer, level) != tyfirst: #(2) 贴牌不当: 有同花不贴完/同花色不跟整牌型
 				own_pok = [num2Poker(p) for p in own[currplayer]]
 				if hist[0][0] in Major:
@@ -601,13 +603,13 @@ def checkLegalMove(poker, level, major, currplayer, history, own, banker): # own
 					major_hold = [p for p in own_pok if p in Major]
 					if len(major_pok) != len(poker): # 这种情况下，同花(主牌)必须已经贴完
 						if len(major_pok) != len(major_hold):
-							setError(currplayer, "ILLEGAL_MOVE")
+							setError(currplayer, "ILLEGAL_MOVE [16]")
 					else: # 完全是主牌
 						count = Counter(major_hold)
 						if tyfirst == "pair":
 							for v in count.values():
 								if v == 2:
-									setError(currplayer, "ILLEGAL_MOVE")
+									setError(currplayer, "ILLEGAL_MOVE [17]")
 						elif tyfirst == "tractor":
 							trpairs = len(history[0])/2
 							pkcount = Counter(pok)
@@ -620,7 +622,7 @@ def checkLegalMove(poker, level, major, currplayer, history, own, banker): # own
 								if v >= 2:
 									hdpairs += 1
 							if pkpairs < trpairs and pkpairs < hdpairs: # 并不是所有对子都用上了
-								setError(currplayer, "ILLEGAL_MOVE")
+								setError(currplayer, "ILLEGAL_MOVE [18]")
 
 				else: 
 					suit = hist[0][0][0]
@@ -628,13 +630,13 @@ def checkLegalMove(poker, level, major, currplayer, history, own, banker): # own
 					suit_hold = [p for p in own_pok if p[0] == suit and p not in Major]
 					if len(suit_pok) != len(poker):    
 						if len(suit_pok) != len(suit_hold):
-							setError(currplayer, "ILLEGAL_MOVE")
+							setError(currplayer, "ILLEGAL_MOVE [19]")
 					else: # 完全是同种花色
 						count = Counter(suit_hold)
 						if tyfirst == "pair":
 							for v in count.values():
 								if v == 2:
-									setError(currplayer, "ILLEGAL_MOVE")
+									setError(currplayer, "ILLEGAL_MOVE [20]")
 						elif tyfirst == "tractor":
 							trpairs = len(history[0])/2
 							pkcount = Counter(pok)
@@ -647,7 +649,7 @@ def checkLegalMove(poker, level, major, currplayer, history, own, banker): # own
 								if v >= 2:
 									hdpairs += 1
 							if pkpairs < trpairs and pkpairs < hdpairs: # 并不是所有对子都用上了
-								setError(currplayer, "ILLEGAL_MOVE")
+								setError(currplayer, "ILLEGAL_MOVE [21]")
 					
 	return outpok
 
@@ -1192,9 +1194,9 @@ def main(full_input):
 			})) 
 			#print(Major)
 
-	except:
+	except Exception as e:
 		if not printed:
-			setError(currplayer, "Unknown Error")
+			setError(currplayer, f"Unknown Error: {e}")
 
 
 # _online = os.environ.get("USER", "") == "root"

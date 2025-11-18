@@ -336,7 +336,6 @@ struct PlayState {
 	}
 
 	void action_mask(py::array_t<bool> &out) {
-		cout << "play type: " << play_type << endl;
 		auto mask = out.mutable_unchecked();
 
 		auto mask_action = [&mask](const vector<card_t> &cards,
@@ -352,13 +351,6 @@ struct PlayState {
 				process_cards(hand, leading_suit, major, singles_leading, pairs_leading);
 			else
 				mask(eos_tok) = true;
-			cout << "singles:" << endl << " ";
-			for(auto &&[type, suit, number]: singles_leading)
-				cout<< " (" << type << ", " << suit << ", " << number << ")";
-			cout << endl << "pairs:" << endl << " ";
-			for(auto &&[type, suit, number]: pairs_leading)
-				cout<< " (" << type << ", " << suit << ", " << number << ")";
-			cout << endl;
 
 			mask_action(singles_leading, true, false);
 			mask_action(pairs_leading, true, true);
@@ -391,14 +383,16 @@ struct PlayState {
 		};
 
 		auto discard_action_mask = [&] {
-			if(n_singles + n_pairs == 0)
+			if(n_singles + n_pairs == 0) {
 				mask(eos_tok) = true;
-			else if(n_pairs > 0 && !pairs_leading.empty())
+			} else if(n_pairs > 0 && !pairs_leading.empty()) {
 				mask_action(pairs_leading, false, true);
-			else if(!singles_leading.empty())
+			} else if(!singles_leading.empty() || !pairs_leading.empty()) {
 				mask_action(singles_leading, true, false);
-			else
+				mask_action(pairs_leading, true, false);
+			} else {
 				mask_action(hand, true, false);
+			}
 		};
 
 		switch(play_type)
@@ -429,16 +423,19 @@ struct PlayState {
 
 		int is_pair = tok / 54;
 		auto card = tok_to_card(tok % 54);
-		cout << "card: (" << get<TYPE>(card) << ", " << get<SUIT>(card) << ", " << get<NUMBER>(card) << ")" << endl;
+		// cout << "card: (" << get<TYPE>(card) << ", " << get<SUIT>(card) << ", " << get<NUMBER>(card) << ")" << endl;
 
 		vector<int> ids;
 		auto deliver = [&](const card_t &card, int count) {
 			int id = card_to_id(card, level);
 			for(;count-- > 0; id += 54) {
+				hand.erase(find<true>(hand, card));
+
 				auto it = find<true>(hand_raw, id);
 				if(it == hand_raw.end())
 					it = find<true>(hand_raw, id += 54);
 				hand_raw.erase(it);
+
 				ids.push_back(id);
 			}
 		};
@@ -512,18 +509,14 @@ struct PlayState {
 		};
 
 		auto discard_step = [&] {
-			if(match_suit(card, leading_suit, major)) {
-				deliver(card, is_pair ? 2 : 1);
+			(is_pair ? n_pairs : n_singles)--;
+
+			deliver(card, is_pair ? 2 : 1);
+			if(match_suit(card, leading_suit, major))
 				erase_card(card, !is_pair, singles_leading, pairs_leading);
 
-				if(!is_pair && n_pairs > 0) {
-					n_singles += 2 * n_pairs;
-					n_pairs = 0;
-				}
-			} else {
-				deliver(card, 1);
-
-				n_singles += 2 * n_pairs - 1;
+			if(!is_pair) {
+				n_singles += 2 * n_pairs;
 				n_pairs = 0;
 			}
 		};
@@ -539,6 +532,7 @@ struct PlayState {
 		case KILL:
 			kill_step();
 			break;
+		case MAYBE_KILL:
 		case DISCARD:
 			discard_step();
 			break;
