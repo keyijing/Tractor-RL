@@ -468,9 +468,8 @@ struct PlayState {
 		};
 
 		auto follow_step = [&] {
-			(is_pair ? n_pairs : n_singles)--;
-
 			if(!is_pair) {
+				n_singles--;
 				deliver(card, 1);
 				erase_card(card, true, singles_leading, pairs_leading);
 				return;
@@ -478,6 +477,7 @@ struct PlayState {
 
 			int len = len_tractor.back();
 			len_tractor.pop_back();
+			n_pairs -= len;
 
 			auto &&[type, suit, number] = card;
 			for(int i = 0; i < len; i++)
@@ -489,9 +489,8 @@ struct PlayState {
 		};
 
 		auto kill_step = [&] {
-			(is_pair ? n_pairs : n_singles)--;
-
 			if(!is_pair) {
+				n_singles--;
 				deliver(card, 1);
 				erase_card(card, true, singles_major, pairs_major);
 				return;
@@ -499,6 +498,7 @@ struct PlayState {
 
 			int len = len_tractor.back();
 			len_tractor.pop_back();
+			n_pairs -= len;
 
 			auto &&[type, suit, number] = card;
 			for(int i = 0; i < len; i++)
