@@ -34,7 +34,6 @@ class Agent:
 		elif state.stage == Stage.PLAY:
 			if self.play is None:
 				leading = state.current[0][1] if state.current else []
-				# print(f'{leading=}')
 				self.play = PlayState(state.level, state.major, state.hand, leading)
 
 			mask = np.zeros(110, dtype=bool)

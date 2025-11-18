@@ -516,7 +516,7 @@ def checkLegalMove(poker, level, major, currplayer, history, own, banker): # own
 						divider, _ = checkThrow(poker, [[]], currplayer, level, major, check=False)
 						divider.sort(key=lambda x: len(x), reverse=True)
 						dividcnt = [len(x) for x in divider]
-						own_divide, r = checkThrow(major_hold, [[]], currplayer, level, check=False)
+						own_divide, r = checkThrow(major_hold, [[]], currplayer, level, major, check=False)
 						own_divide.sort(key=lambda x: len(x), reverse=True)
 						own_cnt = [len(x) for x in own_divide]
 						for poktype in outhis: # 可以使用这种方法的原因在于同一组花色/主牌可组成的牌型数量太少，不会出现多解
@@ -558,7 +558,7 @@ def checkLegalMove(poker, level, major, currplayer, history, own, banker): # own
 						divider, _ = checkThrow(poker, [[]], currplayer, level, major, check=False)
 						divider.sort(key=lambda x: len(x), reverse=True)
 						dividcnt = [len(x) for x in divider]
-						own_divide, r = checkThrow(suit_hold, [[]], currplayer, level, check=False)
+						own_divide, r = checkThrow(suit_hold, [[]], currplayer, level, major, check=False)
 						own_divide.sort(key=lambda x: len(x), reverse=True)
 						own_cnt = [len(x) for x in own_divide]
 						for poktype in outhis: # 可以使用这种方法的原因在于同一组花色/主牌可组成的牌型数量太少，不会出现多解

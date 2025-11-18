@@ -24,17 +24,13 @@ class Env:
 
 		if 'initdata' in output:
 			self.initdata = output.pop('initdata')
-			# print(json.dumps({'initdata': self.initdata}))
 		self.log.append({'output': output})
 
 		content = output['content']
-		# print(json.dumps(content))
-
 		player_id, request = next(iter(content.items()))
 		player = self.players[int(player_id)]
 		stage = request['stage']
 		player.observe(request)
-		# print(player.state.hand)
 
 		if stage == 'deal':
 			stage, mask = player.obs()
@@ -52,7 +48,6 @@ class Env:
 				tok = random_policy(Stage.COVER, mask)
 				ids += player.tok_to_ids(tok)
 
-			# print(ids)
 			for id in ids:
 				player.state.hand.remove(id)
 
@@ -68,7 +63,6 @@ class Env:
 					break
 				else:
 					ids += new_ids
-					# print(new_ids)
 
 		else:
 			raise NotImplementedError(f"{stage}: unknown stage")
@@ -76,7 +70,6 @@ class Env:
 		response = {
 			player_id: {'response': ids}
 		}
-		# print(json.dumps(response))
 		self.log.append(response)
 		return False
 

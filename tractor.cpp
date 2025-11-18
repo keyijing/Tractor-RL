@@ -218,7 +218,7 @@ struct DealState {
 	int level, caller, snatcher;
 	vector<int> hand;
 	DealState(int level_, int caller_, int snatcher_, vector<int> &&hand_):
-		level(level_), caller(caller_), snatcher(snatcher_), hand(hand_) {}
+		level(level_), caller(caller_), snatcher(snatcher_), hand(move(hand_)) {}
 
 	void action_mask(py::array_t<bool> &out) const {
 		auto mask = out.mutable_unchecked();
@@ -266,7 +266,7 @@ struct DealState {
 struct CoverState {
 	int level;
 	vector<int> hand;
-	CoverState(int level_, vector<int> &&hand_): level(level_), hand(hand_) {}
+	CoverState(int level_, vector<int> &&hand_): level(level_), hand(move(hand_)) {}
 
 	void action_mask(py::array_t<bool> &out) const {
 		auto mask = out.mutable_unchecked();
@@ -423,7 +423,6 @@ struct PlayState {
 
 		int is_pair = tok / 54;
 		auto card = tok_to_card(tok % 54);
-		// cout << "card: (" << get<TYPE>(card) << ", " << get<SUIT>(card) << ", " << get<NUMBER>(card) << ")" << endl;
 
 		vector<int> ids;
 		auto deliver = [&](const card_t &card, int count) {
@@ -448,8 +447,10 @@ struct PlayState {
 				singles.erase(it);
 			} else {
 				pairs.erase(it);
-				if(is_single)
-					singles.push_back(card);
+				if(is_single) {
+					it = upper_bound(singles.begin(), singles.end(), card);
+					singles.insert(it, card);
+				}
 			}
 		};
 
