@@ -215,15 +215,15 @@ bool legal_action(card_t card, vector<card_t> pairs, const vector<int> &len_trac
 }
 
 struct DealState {
-	int level, caller, snatcher;
+	int level;
 	vector<int> hand;
-	DealState(int level_, int caller_, int snatcher_, vector<int> &&hand_):
-		level(level_), caller(caller_), snatcher(snatcher_), hand(move(hand_)) {}
+	DealState(int level_): level(level_) {}
 
-	void action_mask(py::array_t<bool> &out) const {
+	void action_mask(int id, int caller, int snatcher, py::array_t<bool> &out) {
 		auto mask = out.mutable_unchecked();
 		mask(10) = true;
 
+		hand.push_back(id);
 		if(caller == -1) {
 			for(int i: hand) {
 				auto &&[type, suit, number] = id_to_card(i, level);
@@ -551,7 +551,7 @@ PYBIND11_MODULE(tractor, m) {
 	m.def("card_to_id", &card_to_id);
 
 	py::class_<DealState>(m, "DealState")
-		.def(py::init<int, int, int, vector<int>&&>())
+		.def(py::init<int>())
 		.def("action_mask", &DealState::action_mask)
 		.def("tok_to_ids", &DealState::tok_to_ids);
 
