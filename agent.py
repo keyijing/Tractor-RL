@@ -5,7 +5,8 @@ import numpy as np
 class Agent:
 	def __init__(self):
 		self.state = AgentState()
-		self.cover_count = 0
+		self.deal = None
+		self.cover = None
 		self.play = None
 
 	def observe(self, req):
@@ -15,15 +16,16 @@ class Agent:
 		state = self.state
 
 		if state.stage == Stage.DEAL:
-			self.deal = DealState(state.level, state.caller, state.snatcher, state.hand)
+			if self.deal is None:
+				self.deal = DealState(state.level)
 
 			mask = np.zeros(12, dtype=bool)
-			self.deal.action_mask(mask)
+			self.deal.action_mask(state.hand[-1], state.caller, state.snatcher, mask)
 
 			return Stage.DEAL, mask
 
 		elif state.stage == Stage.COVER:
-			if self.cover_count == 0:
+			if self.cover is None:
 				self.cover = CoverState(state.level, state.hand)
 
 			mask = np.zeros(54, dtype=bool)
@@ -51,7 +53,6 @@ class Agent:
 			return self.deal.tok_to_ids(tok)
 
 		elif stage == Stage.COVER:
-			self.cover_count = (self.cover_count + 1) % 8
 			return self.cover.tok_to_ids(tok)
 
 		elif stage == Stage.PLAY:

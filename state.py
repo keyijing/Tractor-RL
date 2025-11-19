@@ -1,5 +1,4 @@
-from card import Card, SUIT_TO_ID, NUMBER_TO_ID
-from tractor import id_to_card
+from card import Card, SUIT_TO_ID, NUMBER_TO_ID, id_to_card
 from enum import Enum
 from itertools import count
 
