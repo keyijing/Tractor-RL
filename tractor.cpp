@@ -73,17 +73,20 @@ bool consecutive(const card_t &a, const card_t &b) {
 /**
  * Output: ascending pairs
  */
-auto get_pairs(vector<card_t> cards) {
-	vector<card_t> pairs;
+auto get_pairs(vector<int> cards, int level) {
+	for(int &i: cards) i %= 54;
 	sort(cards.begin(), cards.end());
 
+	vector<card_t> pairs;
 	card_t last = {-1, 0, 0};
-	for(auto &&card: cards)
+	for(int i: cards) {
+		auto card = id_to_card(i, level);
 		if(card == last) {
 			pairs.push_back(card);
 			last = {-1, 0, 0};
 		}
 		else last = card;
+	}
 
 	return pairs;
 }
@@ -288,7 +291,7 @@ struct CoverState {
 
 struct PlayState {
 	static constexpr int kill_tok = 108, eos_tok = 109;
-	int level, major;
+	int level, major, play_count;
 	vector<int> hand_raw;
 	vector<card_t> hand;
 	enum {
@@ -301,8 +304,8 @@ struct PlayState {
 	int leading_suit, n_singles, n_pairs;
 	vector<int> len_tractor;
 	vector<card_t> singles_leading, pairs_leading, singles_major, pairs_major;
-	PlayState(int level, int major_, const vector<int> &hand_, const vector<card_t> &leading):
-		level(level), major(major_), hand_raw(hand_) {
+	PlayState(int level, int major_, vector<int> &&hand_, const vector<int> &leading):
+		level(level), major(major_), play_count(0), hand_raw(move(hand_)) {
 		sort(hand_raw.begin(), hand_raw.end());
 		hand.reserve(hand_raw.size());
 		for(int i: hand_raw)
@@ -315,8 +318,9 @@ struct PlayState {
 			return;
 		}
 
-		leading_suit = is_major(leading[0], major) ? -1: get<SUIT>(leading[0]);
-		auto leading_pairs = get_pairs(leading);
+		auto &&[type, suit, number] = id_to_card(leading[0], level);
+		leading_suit = is_major({type, suit, number}, major) ? -1: suit;
+		auto leading_pairs = get_pairs(leading, level);
 		n_pairs = (int)leading_pairs.size();
 		n_singles = (int)leading.size() - 2 * n_pairs;
 		len_tractor = consecutive_lengths(leading_pairs);
@@ -353,8 +357,10 @@ struct PlayState {
 			else
 				mask(eos_tok) = true;
 
-			mask_action(singles_leading, true, false);
-			mask_action(pairs_leading, true, true);
+			if(play_count < 4) {
+				mask_action(singles_leading, true, false);
+				mask_action(pairs_leading, true, true);
+			}
 		};
 
 		auto follow_action_mask = [&] {
@@ -464,6 +470,7 @@ struct PlayState {
 				process_cards(hand, leading_suit, major, singles_leading, pairs_leading);
 			}
 
+			play_count++;
 			deliver(card, is_pair ? 2 : 1);
 			erase_card(card, false, singles_leading, pairs_leading);
 		};
@@ -692,7 +699,7 @@ PYBIND11_MODULE(tractor, m) {
 		.def("tok_to_ids", &CoverState::tok_to_ids);
 
 	py::class_<PlayState>(m, "PlayState")
-		.def(py::init<int, int, const vector<int>&, const vector<card_t>&>())
+		.def(py::init<int, int, vector<int>&&, const vector<int>&>())
 		.def_readonly_static("eos_tok", &PlayState::eos_tok)
 		.def("action_mask", &PlayState::action_mask)
 		.def("tok_to_ids", &PlayState::tok_to_ids);
