@@ -1,4 +1,3 @@
-from state import Stage
 import numpy as np
 
 def random_policy(mask: np.ndarray):

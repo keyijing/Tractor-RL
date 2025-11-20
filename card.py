@@ -4,7 +4,7 @@ Card = Tuple[int, int, int]
 
 SUIT_TO_ID = {'': None, 'n': -1, 's': 0, 'h': 1, 'c': 2, 'd': 3}
 NUMBER_TO_ID = {k: v for v, k in enumerate([
-	'2','3','4','5','6','7','8','9','10','J','Q','K','A'
+	'2','3','4','5','6','7','8','9','0','J','Q','K','A'
 ])}
 
 def tok_to_card(tok: int) -> Card:

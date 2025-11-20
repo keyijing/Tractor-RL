@@ -845,7 +845,7 @@ def main(full_input):
 			initdata["seed"] = seedRandom
 			initdata["publiccard"] = publiccard
 			if "level" not in full_input["initdata"].keys():
-				initdata["level"] = "2"
+				initdata["level"] = random.choice(cardscale)
 				globalInfo["first_round"] = True
 			else:
 				initdata["level"] = str(full_input["initdata"]["level"])
