@@ -157,8 +157,6 @@ class Agent:
 
 		toks = self.toks
 		self.toks = []
-		if self.player_id == 0:
-			print(f'{toks=}')
 		return toks, mask
 
 	def tok_to_ids(self, tok: int):
