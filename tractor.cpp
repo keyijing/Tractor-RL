@@ -7,6 +7,7 @@
 #include <utility>
 #include <tuple>
 #include <vector>
+#include <ranges>
 
 namespace py = pybind11;
 using namespace std;
@@ -539,6 +540,136 @@ struct PlayState {
 			break;
 		}
 		return ids;
+	}
+};
+
+struct JudgerState {
+	int level, major;
+	int suit, card_num, max_card, winner;
+	vector<int> len_tractor;
+	vector<card_t> tractor_card;
+	JudgerState(int _leval, int _major): level(_leval), major(_major) {}
+
+	// 辅助变量
+	int max_num[13];
+	vector<card_t> cards, hand;
+	int get_num(card_t card) {
+		auto [type, suit, number] = card;
+		if(type == 0) return number;
+		else if(type == 1) return suit == major ? 13 : 12;
+		else return number + 14;
+	}
+
+	auto parse_leader(int playerpos, vector<int> ids, array<vector<int>, 4> raw_hand) {
+		fill(max_num, max_num + 13, -1);
+
+		max_card = -1;
+		card_num = ids.size();
+		len_tractor.clear();
+		tractor_card.clear();
+		winner = playerpos;
+
+		cards.clear(); cards.reserve(ids.size());
+		for(int i: ids) cards.push_back(id_to_card(i, level));
+		sort(cards.begin(), cards.end());
+		suit = is_major(cards[0], major) ? -1 : get<SUIT>(cards[0]);
+		// 对于每个 i，找到连续 i 张牌最大的牌最大是多少
+		for(int player = 0; player < 4; player++) if(player != playerpos) {
+			hand.clear(); hand.reserve(raw_hand[player].size());
+			for(int i: raw_hand[player]) hand.push_back(id_to_card(i, level));
+			sort(hand.begin(), hand.end());
+			card_t last = {-1, 0, 0}, last_pair = {-1, 0, 0};
+			int len = 0;
+			for(auto &&card: hand) {
+				if(!match_suit(card, suit, major)) continue;
+				int num = get_num(card);
+				if(card == last) {
+					if(consecutive(card, last_pair)) len++;
+					else len = 1;
+					max_num[len] = max(max_num[len], num);
+					last_pair = card;
+				}
+				max_num[0] = max(max_num[0], num);
+				last = card;
+			}
+		}
+		for(int i = 11; i >= 0; i--) max_num[i] = max(max_num[i], max_num[i + 1]);
+		// 判断甩牌是否合法
+		int len = 0, last_num = 20, last_pair_num = 20, failcnt = 0, min_fail_id = -1;
+		card_t last = {-1, 0, 0}, last_pair = {-1, 0, 0}, min_fail_card = {3, 0, 0};
+		for(auto &&card: cards) {
+			if(card == last) {
+				if(consecutive(card, last_pair)) len++;
+				else {
+					if(len) {
+						len_tractor.push_back(len);
+						tractor_card.push_back(last_pair);
+					}
+					len = 1;
+				}
+				last_pair = card;
+				last = {-1, 0, 0};
+			} else {
+				if(get<TYPE>(last) != -1) {
+					len_tractor.push_back(0);
+					tractor_card.push_back(last);
+				}
+				last = card;
+			}
+		}
+		if(len) {
+			len_tractor.push_back(len);
+			tractor_card.push_back(last_pair);
+		}
+		if(get<TYPE>(last) != -1) {
+			len_tractor.push_back(0);
+			tractor_card.push_back(last);
+		}
+		for(auto [len, card]: views::zip(len_tractor, tractor_card)) {
+			int num = get_num(card);
+			if(num < max_num[len]) {
+				failcnt += len;
+				
+			}
+		}
+		if(last_num < max_num[0]) failcnt++;
+		if(last_pair_num < max_num[len]) failcnt += len;
+		if(len_tractor.size() <= 1) failcnt = 0;
+		if(failcnt) { // 甩牌失败
+			card_t min_card = {3, 0, 0};
+			int rest_i = -1;
+			for(int i: ids) {
+				card_t card = id_to_card(i, level);
+				if(get<SUIT>(card) == major) get<SUIT>(card) = 4;
+				if(card < min_card) {
+					min_card = card;
+					max_card = get_num(card);
+					rest_i = i;
+				}
+			}
+			ids = {rest_i};
+			len_tractor.clear();
+		}
+		return make_pair(ids, failcnt);
+	}
+
+	void parse_follow(int playerpos, vector<int> ids) {
+		cards.clear(); cards.reserve(ids.size());
+		for(int i: ids) cards.push_back(id_to_card(i, level));
+		sort(cards.begin(), cards.end());
+		if(len_tractor.size() <= 1) { // 不是甩牌
+			bool all_major = true, same_suit = true;
+			for(auto &&card: cards) {
+				all_major &= is_major(card, major);
+				same_suit &= match_suit(card, suit, major);
+			}
+			if(suit < 0) {
+				if(!all_major) return;
+				
+			} else {
+				
+			}
+		}
 	}
 };
 
