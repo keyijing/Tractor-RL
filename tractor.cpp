@@ -554,7 +554,7 @@ struct JudgerState {
 	int level, major;
 	int suit, card_num, max_card, winner;
 	vector<int> len_tractor;
-	vector<card_t> tractor_card;
+	vector<pair<card_t, card_t>> tractor_card;
 	JudgerState(int _leval, int _major): level(_leval), major(_major) {}
 
 	// 辅助变量
@@ -603,61 +603,55 @@ struct JudgerState {
 		for(int i = 11; i >= 0; i--) max_num[i] = max(max_num[i], max_num[i + 1]);
 		// 判断甩牌是否合法
 		int len = 0, last_num = 20, last_pair_num = 20, failcnt = 0, min_fail_id = -1;
-		card_t last = {-1, 0, 0}, last_pair = {-1, 0, 0}, min_fail_card = {3, 0, 0};
+		card_t last = {-1, 0, 0}, last_pair = {-1, 0, 0}, min_fail_card = {3, 0, 0}, last_pair_first;
 		for(auto &&card: cards) {
 			if(card == last) {
 				if(consecutive(card, last_pair)) len++;
 				else {
 					if(len) {
 						len_tractor.push_back(len);
-						tractor_card.push_back(last_pair);
+						tractor_card.emplace_back(last_pair_first, last_pair);
 					}
 					len = 1;
+					last_pair_first = card;
 				}
 				last_pair = card;
 				last = {-1, 0, 0};
 			} else {
 				if(get<TYPE>(last) != -1) {
 					len_tractor.push_back(0);
-					tractor_card.push_back(last);
+					tractor_card.emplace_back(last, last);
 				}
 				last = card;
 			}
 		}
 		if(len) {
 			len_tractor.push_back(len);
-			tractor_card.push_back(last_pair);
+			tractor_card.emplace_back(last_pair_first, last_pair);
 		}
 		if(get<TYPE>(last) != -1) {
 			len_tractor.push_back(0);
-			tractor_card.push_back(last);
+			tractor_card.emplace_back(last, last);
 		}
-		for(auto [len, card]: views::zip(len_tractor, tractor_card)) {
-			int num = get_num(card);
+		if(len_tractor.size() <= 1) return make_pair(move(ids), 0);
+		for(auto &&[len, card_pair]: views::zip(len_tractor, tractor_card)) {
+			auto [first_card, last_card] = card_pair;
+			int num = get_num(last_card);
 			if(num < max_num[len]) {
 				failcnt += len;
-				
-			}
-		}
-		if(last_num < max_num[0]) failcnt++;
-		if(last_pair_num < max_num[len]) failcnt += len;
-		if(len_tractor.size() <= 1) failcnt = 0;
-		if(failcnt) { // 甩牌失败
-			card_t min_card = {3, 0, 0};
-			int rest_i = -1;
-			for(int i: ids) {
-				card_t card = id_to_card(i, level);
-				if(get<SUIT>(card) == major) get<SUIT>(card) = 4;
-				if(card < min_card) {
-					min_card = card;
-					max_card = get_num(card);
-					rest_i = i;
+				if(get<SUIT>(first_card) == major) get<SUIT>(first_card) = 4;
+				if(first_card < min_fail_card) {
+					min_fail_card = first_card;
 				}
 			}
-			ids = {rest_i};
-			len_tractor.clear();
 		}
-		return make_pair(ids, failcnt);
+		if(failcnt == 0) return make_pair(move(ids), 0);
+		// 甩牌失败
+		if(get<SUIT>(min_fail_card) == major) get<SUIT>(min_fail_card) = major;
+		int id = card_to_id(min_fail_card, level);
+		if(find(ids.begin(), ids.end(), id) != ids.end()) id += 54;
+		ids = {id};
+		return make_pair(move(ids), failcnt);
 	}
 
 	void parse_follow(int playerpos, vector<int> ids) {

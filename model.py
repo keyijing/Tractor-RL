@@ -1,0 +1,371 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+def init_weight(module: nn.Module):
+	if isinstance(module, nn.Linear):
+		torch.nn.init.normal_(module.weight, std=module.in_features ** -0.5)
+		if module.bias is not None:
+			torch.nn.init.zeros_(module.bias)
+
+class TensorBuffer:
+	"""
+	A pre-allocated block of GPU memory acting as a memory pool.
+	"""
+	def __init__(self, capacity: int, size: torch.Size, dtype=torch.float, device=None):
+		self.size = size
+		self.capacity = capacity
+		# Shape: (Capacity, Heads, MaxSeqLen, Dim)
+		self.buffer = torch.empty((capacity,) + size, dtype=dtype, device=device)
+		# Simple stack for memory management
+		self.available = list(reversed(range(capacity)))
+
+	def allocate(self):
+		if not self.available:
+			raise MemoryError('bad alloc: no available rows')
+		return self.available.pop()
+
+	def deallocate(self, idx):
+		self.available.append(idx)
+
+	def __getitem__(self, idx):
+		return self.buffer[idx]
+
+	def __setitem__(self, idx, value):
+		self.buffer[idx] = value
+
+class KVCacheRow:
+	"""
+	Logical handle for a single sequence's KV history.
+	Holds pointers to specific rows in the TensorBuffer.
+	"""
+	def __init__(self, buffer: TensorBuffer):
+		self.buffer = buffer
+		self.k_index = buffer.allocate()
+		self.v_index = buffer.allocate()
+		self.curr_pos = 0
+
+	def reset(self):
+		self.curr_pos = 0
+
+	def __del__(self):
+		# Return slots to pool when the object is garbage collected
+		self.buffer.deallocate(self.v_index)
+		self.buffer.deallocate(self.k_index)
+
+class KVCache:
+	"""
+	Batch operator for KVCacheRows. 
+	Manages vectorized updates and retrievals for a specific layer.
+	"""
+	def __init__(self, caches: list[KVCacheRow]):
+		self.caches = caches
+		self.buffer = caches[0].buffer
+		self.batch_size = len(caches)
+
+		# Store indices as tensors for Advanced Indexing
+		self.device = self.buffer.buffer.device
+		self.k_indices = torch.tensor([c.k_index for c in caches], dtype=torch.int64, device=self.device)
+		self.v_indices = torch.tensor([c.v_index for c in caches], dtype=torch.int64, device=self.device)
+
+	def update(self, k_new: torch.Tensor, v_new: torch.Tensor, pos_ids: torch.Tensor, valid_lengths: list[int]):
+		"""
+		k_new, v_new: (Batch, Heads, Seq_Len, Dim)
+		pos_ids: (Batch, Seq_Len)- Target write positions
+		valid_lengths: (Batch,) - Actual length to increment
+		"""
+		# 1. Update GPU Buffer (Advanced Indexing)
+		# Advanced Indexing Note:
+		# self.buffer shape: (Capacity, Heads, MaxLen, Dim)
+		# Indexing: buffer[Indices(B,1), :, Pos(B,S), :]
+		# PyTorch moves indexed dimensions to the front: Result shape is (Batch, Seq_Len, Heads, Dim)
+		# Therefore, we must transpose k_new from (B, H, S, D) to (B, S, H, D) to match.
+		self.buffer[self.k_indices.unsqueeze(1), :, pos_ids, :] = k_new.transpose(1, 2)
+		self.buffer[self.v_indices.unsqueeze(1), :, pos_ids, :] = v_new.transpose(1, 2)
+
+		# We must update the underlying KVCacheRow objects so they stay valid
+		for cache, length in zip(self.caches, valid_lengths):
+			cache.curr_pos += length
+
+	def fetch(self):
+		"""
+		Returns a view up to the deepest valid position in the batch.
+		"""
+		max_pos = max(cache.curr_pos for cache in self.caches)
+		return (
+			self.buffer[self.k_indices, :, :max_pos, :],
+			self.buffer[self.v_indices, :, :max_pos, :]
+		)
+
+	def get_offsets(self):
+		return torch.tensor([cache.curr_pos for cache in self.caches], dtype=torch.int64, device=self.device)
+
+class RoPE(nn.Module):
+	def __init__(self, dim, max_seq_len, base = 10000):
+		super().__init__()
+		self.dim = dim
+
+		# Create position index [0, 1, 2, ..., maxlen-1]
+		position = torch.arange(max_seq_len, dtype=torch.float).unsqueeze(dim=-1)
+
+		# Calculate frequency factor
+		dim_index = torch.arange(0, dim, 2, dtype=torch.float)
+		dim_index = torch.pow(base, -dim_index / dim)
+
+		# Calculate product of position and frequency factors
+		freqs = position * dim_index
+
+		# Create complex rotation factors (MaxSeqLen, Dim/2)
+		self.freqs_cis = nn.Parameter(torch.polar(torch.ones_like(freqs), freqs), requires_grad=False)
+
+	def forward(self, x, pos_ids: torch.Tensor = None):
+		"""
+		x: (Batch, Heads, Seq_Len, Head_Dim)
+		pos_ids: (Batch, Seq_Len)
+		"""
+		batch_size, num_heads, seq_len, head_dim = x.shape
+
+		# Separate real and imaginary parts
+		x_complex = torch.view_as_complex(
+			x.reshape(batch_size, num_heads, seq_len, head_dim//2, 2)
+		)
+
+		if pos_ids is None:
+			# Standard sequential (1, Seq_Len, Dim/2)
+			current_freqs = self.freqs_cis[:seq_len].unsqueeze(0)
+		else:
+			# Select the specific rotation frequencies for the current positions
+			# pos_ids: (Batch, Seq_Len) -> freqs: (Batch, Seq_Len, Dim/2)
+			current_freqs = self.freqs_cis[pos_ids]
+
+		# Reshape freqs for broadcasting: (Batch, Seq_Len, Dim/2) -> (Batch, 1, Seq_Len, Dim/2)
+		current_freqs = current_freqs.unsqueeze(1)
+
+		# Apply rotation
+		x_rotated = x_complex * current_freqs
+
+		# Convert back to real
+		x_out = torch.view_as_real(x_rotated).flatten(start_dim=-2)
+
+		return x_out.type_as(x)
+
+class FlashMultiHeadAttention(nn.Module):
+	def __init__(self, d_model, hidden_dim, maxlen, num_heads, dropout_rate):
+		super(FlashMultiHeadAttention, self).__init__()
+
+		self.num_heads = num_heads
+		self.head_dim = hidden_dim // num_heads
+		self.dropout_rate = dropout_rate
+
+		assert hidden_dim % num_heads == 0, "hidden_dim must be divisible by num_heads"
+		assert self.head_dim % 2 == 0, "head_dim must be even for RoPE"
+
+		self.q_linear = nn.Linear(d_model, hidden_dim)
+		self.k_linear = nn.Linear(d_model, hidden_dim)
+		self.v_linear = nn.Linear(d_model, hidden_dim)
+		self.out_linear = nn.Linear(hidden_dim, d_model)
+
+		self.rope = RoPE(self.head_dim, maxlen)
+
+	def forward(self, x: torch.Tensor, attn_mask = None, pos_ids = None, kv_cache: KVCache = None, valid_lengths: list[int] = None):
+		"""
+		x: (Batch, Seq_Len, D_Model)
+		kv_cache: KVCache object for this specific layer
+		"""
+		batch_size, seq_len, _ = x.size()
+
+		# 1. Project Q, K, V
+		Q = self.q_linear(x)
+		K = self.k_linear(x)
+		V = self.v_linear(x)
+
+		# Reshape to (Batch, Seq_Len, Heads, Dim) -> Transpose to (Batch, Heads, Seq_Len, Dim)
+		Q = Q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+		K = K.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+		V = V.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+
+		# 2. RoPE & KV Cache
+		if kv_cache is not None:
+			assert pos_ids is not None, "pos_ids must be provided when using kv_cache"
+
+			# Apply RoPE to new queries and keys using the offset
+			Q = self.rope(Q, pos_ids)
+			K = self.rope(K, pos_ids)
+
+			# Update Cache & Fetch Full History
+			kv_cache.update(K, V, pos_ids, valid_lengths)
+			K, V = kv_cache.fetch()
+
+			# Note: attn_mask is pre-computed in Transformer block to save time
+			is_causal = False
+		else:
+			# Standard Training / No-Cache Mode
+			# Apply RoPE starting from 0
+			Q = self.rope(Q)
+			K = self.rope(K)
+
+			# In standard training, we use is_causal=True.
+			is_causal = True
+			attn_mask = None
+
+		# 3. Attention Dispatch
+		attn_output = F.scaled_dot_product_attention(
+			Q, K, V,
+			dropout_p=self.dropout_rate if self.training else 0.0, 
+			attn_mask=attn_mask,
+			is_causal=is_causal
+		)
+
+		# 4. Output Projection
+		attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
+		output = self.out_linear(attn_output)
+
+		return output
+
+class PointWiseFeedForward(nn.Module):
+	def __init__(self, d_model, dropout_rate):
+		super(PointWiseFeedForward, self).__init__()
+
+		# SwiGLU
+		hidden_dim = d_model * 8 // 3
+		hidden_dim = (hidden_dim + 31) // 32 * 32
+		self.up_linear = nn.Linear(d_model, hidden_dim)
+		self.down_linear = nn.Linear(hidden_dim, d_model)
+		self.gate = nn.Linear(d_model, hidden_dim)
+		self.dropout = nn.Dropout(dropout_rate)
+
+	def forward(self, inputs):
+		gate = F.silu(self.gate(inputs))
+		filtered = gate * self.up_linear(inputs)
+		outputs = self.down_linear(self.dropout(filtered))
+		return outputs
+
+class Transformer(nn.Module):
+	def __init__(self, d_model: int, max_seq_len: int, num_blocks = 4, num_heads = 1, norm_first = True, dropout_rate = 0.0):
+		super(Transformer, self).__init__()
+
+		self.norm_first = norm_first
+		self.num_blocks = num_blocks
+		self.d_model = d_model
+		self.hidden_dim = 2 * d_model
+		self.max_seq_len = max_seq_len
+		self.num_heads = num_heads
+
+		self.attn_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(num_blocks)])
+		self.attn_layers = nn.ModuleList([
+			FlashMultiHeadAttention(d_model, self.hidden_dim, max_seq_len, num_heads, dropout_rate)
+			for _ in range(num_blocks)
+		])
+		self.fwd_norms = nn.ModuleList([nn.LayerNorm(d_model) for _ in range(num_blocks)])
+		self.fwd_layers = nn.ModuleList([PointWiseFeedForward(d_model, dropout_rate) for _ in range(num_blocks)])
+
+	@property
+	def cache_shape(self):
+		return torch.Size((self.num_heads, self.max_seq_len, self.hidden_dim // self.num_heads))
+
+	def create_kv_cache(self, buffer: TensorBuffer):
+		"""
+		Creates a list of rows (one per block) for a single sequence.
+		"""
+		return [KVCacheRow(buffer) for _ in range(self.num_blocks)]
+
+	def forward(self, seqs: torch.Tensor, kv_caches: list[KVCache] = None, valid_lengths: list[int] = None):
+		"""
+		seqs: (Batch, Seq_Len, D_Model)
+		kv_caches: List of KVCache objects (one per layer)
+		valid_lengths: List of actual new token counts per sequence
+		"""
+		attn_mask = None
+		pos_ids = None
+
+		# Pre-computation for Inference Mode
+		if kv_caches is not None:
+			_, seq_len, _ = seqs.shape
+			device = seqs.device
+
+			# 1. Get Starting Offsets (Shape: Batch)
+			# We use layer 0's cache to determine offsets (all layers are synced)
+			offsets = kv_caches[0].get_offsets()
+
+			# 2. Calculate Pos IDs (Offsets + Current Sequence indices)
+			# Shape: (Batch, Seq_Len)
+			# pos_ids[b, i] = offset[b] + i
+			pos_ids = offsets.unsqueeze(1) + torch.arange(seq_len, dtype=torch.int64, device=device).unsqueeze(0)
+
+			# 3. Calculate EXACT Max Position for Masking
+			# The buffer will be updated up to: offset + valid_len
+			# Note: We use valid_lengths (actual tokens), NOT seq_len (padded tokens)
+			valid_lengths_tensor = torch.tensor(valid_lengths, device=device, dtype=torch.int64)
+
+			# This is the correction: Max position is determined by valid data, not padding
+			max_pos = (offsets + valid_lengths_tensor).max().item()
+
+			# 4. Construct Mask
+			# Rows: Global Position (Batch, Seq_Len, 1)
+			rows = pos_ids.unsqueeze(-1)
+			# Cols: Buffer Index (1, 1, Max_Pos)
+			cols = torch.arange(max_pos, device=device).view(1, 1, -1)
+
+			# Mask: True if Col <= Row
+			attn_mask = cols <= rows
+			attn_mask = attn_mask.unsqueeze(1) # (Batch, 1, Seq_Len, Max_Pos)
+
+		# --------------------------------------------------------------
+		# Transformer Loop
+		# --------------------------------------------------------------
+		for i in range(self.num_blocks):
+			# Select specific cache for this layer if available
+			layer_cache = kv_caches[i] if kv_caches is not None else None
+
+			if self.norm_first:
+				x = self.attn_norms[i](seqs)
+				# Pass pre-computed mask/pos_ids
+				mha_outputs = self.attn_layers[i](x, attn_mask, pos_ids, layer_cache, valid_lengths)
+				seqs = seqs + mha_outputs
+				seqs = seqs + self.fwd_layers[i](self.fwd_norms[i](seqs))
+			else:
+				mha_outputs = self.attn_layers[i](seqs, attn_mask, pos_ids, layer_cache, valid_lengths)
+				seqs = self.attn_norms[i](seqs + mha_outputs)
+				seqs = self.fwd_norms[i](seqs + self.fwd_layers[i](seqs))
+
+		return seqs
+
+def collate_kv_cache(kv_caches: list[list[KVCacheRow]]):
+	num_blocks = len(kv_caches[0])
+	return [KVCache([cache[i] for cache in kv_caches]) for i in range(num_blocks)]
+
+# -----------------------------------------------------------------------------
+# Verification of Correctness
+# -----------------------------------------------------------------------------
+from timer import CumulativeTimer
+
+if __name__ == '__main__':
+	timer = CumulativeTimer()
+
+	# Setup
+	BATCH, HEADS, DIM, DTYPE, DEV = 64, 4, 256, torch.float32, 'cuda' # Use float32 for clear verification
+	model = Transformer(DIM, 1024, num_blocks=8, num_heads=HEADS).to(DEV)
+
+	buffer = TensorBuffer(2 * BATCH * 8, model.cache_shape, dtype=DTYPE, device=DEV)
+	caches = [model.create_kv_cache(buffer) for _ in range(BATCH)]
+	cache = collate_kv_cache(caches)
+
+	seq = torch.empty((BATCH, 1024, DIM), device=DEV)
+	out = torch.empty((BATCH, 1024, DIM), device=DEV)
+
+	with timer, torch.inference_mode():
+		for _ in range(100):
+			valid_lengths = torch.randint(1, 5, size=(BATCH,)).tolist()
+			x = torch.rand((BATCH, 4, DIM), device=DEV, dtype=DTYPE)
+			y = model(x, cache, valid_lengths)
+			for j, (c, l) in enumerate(zip(cache[0].caches, valid_lengths)):
+				seq[j, c.curr_pos - l : c.curr_pos] = x[j, :l]
+				out[j, c.curr_pos - l : c.curr_pos] = y[j, :l]
+
+		out2: torch.Tensor = model(seq)
+
+	print(timer.get_total_time())
+
+	for i, l in enumerate(c.curr_pos for c in cache[0].caches):
+		err = (out[i, :l] - out2[i, :l]).abs().max()
+		print(cache[0].caches[i].curr_pos, err)
