@@ -15,8 +15,6 @@ class Tractor():
 
 		self.suit_set = ['s','h','c','d']
 		self.card_scale = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '0', 'J', 'Q', 'K']
-		self.major = None
-		self.level = None
 		self.agent_names = ['player_%d' % i for i in range(4)]
 
 
@@ -38,18 +36,12 @@ class Tractor():
 		self.public_card = self.total_deck[100:] # saving 8 public cards
 		self.card_todeal = self.total_deck[:100]
 		self.player_decks = [[] for _ in range(4)]
-		# self.allocation = [[] for _ in range(4)]
-		# self.allocation[0] = self.card_todeal[:25]
-		# self.allocation[1] = self.card_todeal[25:50]
-		# self.allocation[2] = self.card_todeal[50:75]
-		# self.allocation[3] = self.card_todeal[75:100]
-		# self._setMajor()
 		self.covered_cards = [] 
 		# loading and initializing agents and game states
 		self.score = 0
 		self.history = []
 		self.played_cards = [[] for _ in range(4)]
-		self.reward = None
+		self.reward = [0 for _ in range(4)]
 		self.done = False
 		self.round = 0 # 轮次计数器
 
@@ -59,7 +51,7 @@ class Tractor():
 
 	def step(self, response): #response: dict{'player': player_id, 'action': action}
 		# Each step receives a response and provides an obs
-		self.reward = None
+		self.reward = [0 for _ in range(4)]
 		curr_player = response['player']
 		action = response['action']
 		if type(action) is not list:
@@ -125,9 +117,7 @@ class Tractor():
 					self.done = True
 		self.round += 1
 
-		if self.reward:
-			return self._get_request(next_player), self.reward, self.done
-		return self._get_request(next_player), None, self.done
+		return self._get_request(next_player), self.reward, self.done
 
 
 	def _raise_error(self, player, info):
@@ -261,7 +251,7 @@ class Tractor():
 			self.player_decks[player].remove(card)
 
 	def _reveal(self, currplayer, winner): # 扣底
-		if self._checkPokerType(self.history[0], (currplayer-3)%4) != "suspect":
+		if self._checkPokerType(self.history[0]) != "suspect":
 			mult = len(self.history[0])
 		else:
 			divided, _ = self._checkThrow(self.history[0], (currplayer-3)%4, check=False)
@@ -290,7 +280,7 @@ class Tractor():
 			self.Major = [suit + self.level for suit in self.suit_set] + self.Major
 		self.point_order.remove(self.level)
 
-	def _checkPokerType(self, poker, currplayer): #poker: list[int]
+	def _checkPokerType(self, poker): #poker: list[int]
 		level = self.level
 		poker = [self._id2name(p) for p in poker]
 		if len(poker) == 1:
@@ -333,7 +323,7 @@ class Tractor():
 		own = self.player_decks
 		level = self.level
 		major = self.major
-		tyPoker = self._checkPokerType(poker, currplayer)
+		tyPoker = self._checkPokerType(poker)
 		poker = [self._id2name(p) for p in poker]
 		assert tyPoker != "suspect", "Type 'throw' should contain common types"
 		own_pok = [[self._id2name(num) for num in hold] for hold in own]
@@ -583,14 +573,14 @@ class Tractor():
 		own_pok = [self._id2name(p) for p in own[currplayer]]
 		if len(history) == 0 or len(history) == 4: # The first move in a round
 			# Player can only throw in the first round
-			typoker = self._checkPokerType(poker, currplayer)
+			typoker = self._checkPokerType(poker)
 			if typoker == "suspect":
 				outpok_s, ilcnt = self._checkThrow(poker, currplayer, True)
 				if ilcnt > 0:
 					self._punish(currplayer, ilcnt*10)
 				outpok = [p for poktype in outpok_s for p in poktype] # 符合交互模式，把甩牌展开
 		else:
-			tyfirst = self._checkPokerType(history[0], currplayer)
+			tyfirst = self._checkPokerType(history[0])
 			if len(poker) != len(history[0]):
 				self._raise_error(currplayer, "ILLEGAL_MOVE")
 			if tyfirst == "suspect": # 这里own不一样了，但是可以不需要check
@@ -609,7 +599,7 @@ class Tractor():
 						outhis.sort(key=lambda x: len(x), reverse=True) # 牌型从大到小来看
 						major_hold = [p for p in own_pok if p in self.Major]
 						matching = True
-						if self._checkPokerType(outhis[0], currplayer) == "tractor": # 拖拉机来喽
+						if self._checkPokerType(outhis[0]) == "tractor": # 拖拉机来喽
 							divider, _ = self._checkThrow(poker, currplayer, check=False)
 							divider.sort(key=lambda x: len(x), reverse=True)
 							dividcnt = [len(x) for x in divider]
@@ -651,11 +641,11 @@ class Tractor():
 						outhis.sort(key=lambda x: len(x), reverse=True) # 牌型从大到小来看
 						suit_hold = [p for p in own_pok if p not in self.Major and p[0] == suit]
 						matching = True
-						if self._checkPokerType(outhis[0], currplayer) == "tractor": # 拖拉机来喽
+						if self._checkPokerType(outhis[0]) == "tractor": # 拖拉机来喽
 							divider, _ = self._checkThrow(poker, currplayer, check=False)
 							divider.sort(key=lambda x: len(x), reverse=True)
 							dividcnt = [len(x) for x in divider]
-							own_divide, r = self._checkThrow(suit_hold, currplayer, check=False)
+							own_divide, _ = self._checkThrow(suit_hold, currplayer, check=False)
 							own_divide.sort(key=lambda x: len(x), reverse=True)
 							own_cnt = [len(x) for x in own_divide]
 							for poktype in outhis: # 可以使用这种方法的原因在于同一组花色/主牌可组成的牌型数量太少，不会出现多解
@@ -687,13 +677,13 @@ class Tractor():
 			else: # 常规牌型
 			# 该情形下的非法行动：(1) 有可以应手的牌型但贴牌或用主牌毙 (2) 贴牌不当(有同花不贴/拖拉机有对子不贴)
 				if self._checkRes(history[0], own[currplayer]): #(1) 有应手但贴牌或毙
-					if self._checkPokerType(poker, currplayer) != tyfirst:
+					if self._checkPokerType(poker) != tyfirst:
 						self._raise_error(currplayer,"ILLEGAL_MOVE")
 					if hist[0][0] in self.Major and pok[0] not in self.Major:
 						self._raise_error(currplayer,"ILLEGAL_MOVE")
 					if hist[0][0] not in self.Major and (pok[0] in self.Major or pok[0][0] != hist[0][0][0]):
 						self._raise_error(currplayer, "ILLEGAL_MOVE") 
-				elif self._checkPokerType(poker, currplayer) != tyfirst: #(2) 贴牌不当: 有同花不贴完/同花色不跟整牌型
+				elif self._checkPokerType(poker) != tyfirst: #(2) 贴牌不当: 有同花不贴完/同花色不跟整牌型
 					own_pok = [self._id2name(p) for p in own[currplayer]]
 					if hist[0][0] in self.Major:
 						major_pok = [p for p in pok if p in self.Major]
@@ -765,7 +755,7 @@ class Tractor():
 					score += 10
 		win_seq = 0 # 获胜方在本轮行动中的顺位，默认为0
 		win_move = hist[0] # 获胜方的出牌，默认为首次出牌
-		tyfirst = self._checkPokerType(history[0], currplayer)
+		tyfirst = self._checkPokerType(history[0])
 		if tyfirst == "suspect": # 甩牌
 			first_parse, _ = self._checkThrow(history[0], currplayer, check=False)
 			first_parse.sort(key=lambda x: len(x), reverse=True)
@@ -833,7 +823,7 @@ class Tractor():
 		else: # 常规牌型
 			#print("Common: Normal")
 			for i in range(1, 4):
-				if self._checkPokerType(history[i], currplayer) != tyfirst: # 牌型不对
+				if self._checkPokerType(history[i]) != tyfirst: # 牌型不对
 					continue
 				#print("check: Normal")
 				if (hist[0][0] in self.Major and hist[i][0] not in self.Major) or (hist[0][0] not in self.Major and (hist[i][0] not in self.Major and hist[i][0][0] != hist[0][0][0])):
@@ -875,25 +865,15 @@ class Tractor():
 	def _reward(self, player, points):
 		if (player-self.banker_pos) % 2 != 0: # farmer getting points
 			self.score += points
-		self.reward = {}
 		for i in range(4):
 			if (i-player) % 2 == 0:
-				self.reward[self.agent_names[i]] = points
+				self.reward[i] += points
 			else:
-				self.reward[self.agent_names[i]] = -points
+				self.reward[i] -= points
 
 	def _punish(self, player, points):
 		if (player-self.banker_pos) % 2 != 0:
 			self.score -= points
 		else:
 			self.score += points
-	
-	def action_intpt(self, action, player):
-		'''
-		interpreting action(cardname) to response(dick{'player': int, 'action': list[int]})
-		action: list[str(cardnames)]
-		'''
-		player_deck = self.player_decks[player]
-		action = self._name2id_seq(action, player_deck)
-		return {'player': player, 'action': action}
-		
+		self.reward[player] -= points
