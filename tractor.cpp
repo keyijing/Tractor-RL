@@ -357,10 +357,8 @@ struct PlayState {
 			else
 				mask(eos_tok) = true;
 
-			if(play_count < 4) {
-				mask_action(singles_leading, true, false);
-				mask_action(pairs_leading, true, true);
-			}
+			mask_action(singles_leading, true, false);
+			mask_action(pairs_leading, true, true);
 		};
 
 		auto follow_action_mask = [&] {

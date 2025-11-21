@@ -11,10 +11,11 @@ class Stage(Enum):
 
 CARD_TOK  = 0    #   0 ~ 53  (54)
 PLAY_OUT  = 54   #  54 ~ 163 (108 + 2)
-MAJOR_TOK = 164  # 164 ~ 168 (4 + 1)
-COVER_TOK = 169
-TRICK_TOK = 170
-N_TOKENS  = 171
+SCORE_TOK = 164  # 164 ~ 170 (0 ~ 2, 3, 4 ~ 7, 8, 9 ~ 10, 11, 12)
+MAJOR_TOK = 171  # 171 ~ 175 (4 + 1)
+COVER_TOK = 176
+TRICK_TOK = 177
+N_TOKENS  = 178
 
 DEAL_MASK  = 0   #  0 ~ 10  (10 + 1)
 COVER_MASK = 5   # 11 ~ 64  (54)
@@ -66,6 +67,9 @@ class Agent:
 		self.snatcher = snatcher
 		self.banker = banker
 
+	def _get_tok(self, id: int, player: int):
+		return CARD_TOK + card_to_tok(id_to_card(id, self.level)), player + 1
+
 	def observe(self, req):
 		stage = req['stage']
 
@@ -78,6 +82,16 @@ class Agent:
 			level = glob['level']
 			self.level = NUMBER_TO_ID[level]
 
+			self.toks.append((SCORE_TOK + (
+				0 if self.level <= 2 else
+				1 if self.level == 3 else
+				2 if self.level <= 7 else
+				3 if self.level == 8 else
+				4 if self.level <= 10 else
+				5 if self.level == 11 else
+				6
+			), 0))
+
 		banking = glob['banking']
 		self._update_banking(banking)
 
@@ -86,18 +100,14 @@ class Agent:
 			id = req['deliver'][0]
 			self.hand.append(id)
 
-			card = id_to_card(id, self.level)
-			self.toks.append((CARD_TOK + card_to_tok(card), 0))
+			self.toks.append(self._get_tok(id, -1))
 
 		elif stage == 'cover':
 			self.stage = Stage.COVER
 			cards = req['deliver']
 			self.hand.extend(cards)
 
-			self.toks.extend(
-				(CARD_TOK + card_to_tok(id_to_card(id, self.level)), 1)
-				for id in cards
-			)
+			self.toks.extend([self._get_tok(id, -1) for id in cards])
 			self.toks.append((COVER_TOK, 0))
 
 		elif stage == 'play':
@@ -110,12 +120,8 @@ class Agent:
 					flag = True
 					for card in cards:
 						self.hand.remove(card)
-
 				if flag:
-					self.toks.extend(
-						(CARD_TOK + card_to_tok(id_to_card(id, self.level)), player_id + 1)
-						for id in cards
-					)
+					self.toks.extend([self._get_tok(id, player_id) for id in cards])
 
 			self.toks.append((TRICK_TOK, 0))
 
@@ -123,10 +129,7 @@ class Agent:
 			self.leading = current[0] if current else []
 			for cards, player in zip(current, count(req['history'][3])):
 				player_id = self.get_id(player)
-				self.toks.extend(
-					(CARD_TOK + card_to_tok(id_to_card(id, self.level)), player_id + 1)
-					for id in cards
-				)
+				self.toks.extend([self._get_tok(id, player_id) for id in cards])
 
 		else:
 			raise NotImplementedError(f"{stage}: unknown stage")
