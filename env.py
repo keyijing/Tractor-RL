@@ -10,6 +10,7 @@ class Env:
 		self.players = [Agent() for _ in range(4)]
 		self.rewards = [0 for _ in range(4)]
 		self.req = self.game.reset()
+		self.done = False
 
 		self.sum = 0
 
@@ -60,12 +61,12 @@ class Env:
 				'player': self.player_id,
 				'action': self.ids,
 			}
-			self.req, rewards, done = self.game.step(response)
+			self.req, rewards, self.done = self.game.step(response)
 			for i, reward in enumerate(rewards):
 				self.rewards[i] += reward
-			if done:
+			if self.done:
 				print(self.rewards)
-			return done
+			return self.done
 		else:
 			return False
 
