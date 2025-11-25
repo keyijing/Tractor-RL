@@ -386,13 +386,15 @@ class Model(nn.Module):
 		# values: (Batch, Seq_Len) -> (Batch,)
 		logits = torch.stack([logits[i, length - 1] for i, length in enumerate(valid_lengths)])
 		logits = torch.where(action_mask, logits, -torch.inf)
+		logits -= logits.logsumexp(dim=-1, keepdim=True)
 		values = torch.stack([values[i, length - 1] for i, length in enumerate(valid_lengths)])
-		distrib = torch.distributions.Categorical(logits=logits)
 		if deterministic:
-			actions = logits.argmax(dim=-1)
+			actions = logits.argmax(dim=-1, keepdim=True)
 		else:
-			actions = distrib.sample()
-		log_probs = distrib.log_prob(actions)
+			probs = torch.exp(logits)
+			actions = torch.multinomial(probs, num_samples=1, replacement=True)
+		log_probs = logits.gather(1, actions).squeeze(dim=-1)
+		actions = actions.squeeze(dim=-1)
 		return {
 			'actions': actions,
 			'logits': logits,
