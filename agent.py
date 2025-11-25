@@ -18,9 +18,9 @@ TRICK_TOK = 177
 N_TOKENS  = 178
 
 DEAL_MASK  = 0   #  0 ~ 10  (10 + 1)
-COVER_MASK = 5   # 11 ~ 64  (54)
-PLAY_MASK  = 59  # 65 ~ 173 (108 + 1)
-N_ACTIONS  = 174
+COVER_MASK = 11  # 11 ~ 64  (54)
+PLAY_MASK  = 65  # 65 ~ 174 (108 + 2)
+N_ACTIONS  = 176
 
 class Agent:
 	def __init__(self):
@@ -44,6 +44,7 @@ class Agent:
 
 		# seq toks
 		self.toks = []
+		self.his_toks = []
 
 	def _update_banking(self, banking):
 		caller = self.get_id(banking['called'])
@@ -159,6 +160,7 @@ class Agent:
 			raise NotImplementedError()
 
 		toks = self.toks
+		self.his_toks.extend(toks)
 		self.toks = []
 		return toks, mask
 
@@ -169,6 +171,7 @@ class Agent:
 
 		elif self.stage == Stage.COVER:
 			tok -= COVER_MASK
+			self.toks.append(self._get_tok(tok, 0))
 			return self.cover.tok_to_ids(tok)
 
 		elif self.stage == Stage.PLAY:

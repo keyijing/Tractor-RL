@@ -4,9 +4,14 @@ import torch.nn.functional as F
 
 def init_weight(module: nn.Module):
 	if isinstance(module, nn.Linear):
-		torch.nn.init.normal_(module.weight, std=module.in_features ** -0.5)
+		nn.init.normal_(module.weight, std=module.in_features ** -0.5)
 		if module.bias is not None:
-			torch.nn.init.zeros_(module.bias)
+			nn.init.zeros_(module.bias)
+	elif isinstance(module, nn.Embedding):
+		nn.init.normal_(module.weight, std=module.embedding_dim ** -0.5)
+		if module.padding_idx is not None:
+			with torch.no_grad():
+				module.weight[module.padding_idx].zero_()
 
 class TensorBuffer:
 	"""
@@ -99,6 +104,14 @@ class KVCache:
 
 	def get_offsets(self):
 		return torch.tensor([cache.curr_pos for cache in self.caches], dtype=torch.int64, device=self.device)
+
+def collate_kv_cache(kv_cache_rows_list: list[list[KVCacheRow]]):
+	"""
+	Converts a list of [Block0_Row, Block1_Row...] into a list of [Block0_BatchCache, Block1_BatchCache...]
+	"""
+	num_blocks = len(kv_cache_rows_list[0])
+	# Transpose list of lists
+	return [KVCache([cache[i] for cache in kv_cache_rows_list]) for i in range(num_blocks)]
 
 class RoPE(nn.Module):
 	def __init__(self, dim, max_seq_len, base = 10000):
@@ -295,10 +308,10 @@ class Transformer(nn.Module):
 			# 3. Calculate EXACT Max Position for Masking
 			# The buffer will be updated up to: offset + valid_len
 			# Note: We use valid_lengths (actual tokens), NOT seq_len (padded tokens)
-			valid_lengths_tensor = torch.tensor(valid_lengths, device=device, dtype=torch.int64)
-
-			# This is the correction: Max position is determined by valid data, not padding
-			max_pos = (offsets + valid_lengths_tensor).max().item()
+			max_pos = max(
+				cache.curr_pos + length
+				for cache, length in zip(kv_caches[0].caches, valid_lengths)
+			)
 
 			# 4. Construct Mask
 			# Rows: Global Position (Batch, Seq_Len, 1)
@@ -330,9 +343,62 @@ class Transformer(nn.Module):
 
 		return seqs
 
-def collate_kv_cache(kv_caches: list[list[KVCacheRow]]):
-	num_blocks = len(kv_caches[0])
-	return [KVCache([cache[i] for cache in kv_caches]) for i in range(num_blocks)]
+class Model(nn.Module):
+	def __init__(self, n_toks: int, n_players: int, n_actions: int, d_model: int, max_seq_len: int, **conf):
+		super(Model, self).__init__()
+
+		self.n_players = n_players
+		self.n_actions = n_actions
+		self.max_seq_len = max_seq_len
+		self.tok_emb = nn.Embedding(n_toks, d_model)
+		self.player_emb = nn.Embedding(n_players + 1, d_model, padding_idx=0)
+		self.policy_fn = nn.Linear(d_model, n_actions)
+		self.value_fn = nn.Linear(d_model, 1)
+		self.transformer = Transformer(d_model, max_seq_len, **conf)
+
+		self.apply(init_weight)
+	
+	def forward(self, toks: torch.Tensor, id_toks: torch.Tensor, kv_caches: list[KVCache] = None, valid_lengths: list[int] = None):
+		seqs = self.tok_emb(toks) + self.player_emb(id_toks)
+		seqs = self.transformer(seqs, kv_caches, valid_lengths)
+		logits = self.policy_fn(seqs)
+		values = self.value_fn(seqs).squeeze(-1)
+		return logits, values
+	
+	@torch.inference_mode()
+	def get_action_and_value(
+		self,
+		toks: torch.Tensor,
+		id_toks: torch.Tensor,
+		action_mask: torch.Tensor,
+		kv_caches: list[KVCache] = None,
+		valid_lengths: list[int] = None,
+		deterministic = False
+	) -> dict[str, torch.Tensor]:
+		"""
+		toks: (Batch, Seq_Len) - new tokens appended at last
+		id_toks: (Batch, Seq_Len) - player id of each token
+		action_mask: (Batch, N_Actions) - valid actions
+		"""
+		logits, values = self(toks, id_toks, kv_caches, valid_lengths)
+		# Get the logits and values of the last valid position
+		# logits: (Batch, Seq_Len, N_Actions) -> (Batch, N_Action)
+		# values: (Batch, Seq_Len) -> (Batch,)
+		logits = torch.stack([logits[i, length - 1] for i, length in enumerate(valid_lengths)])
+		logits = torch.where(action_mask, logits, -torch.inf)
+		values = torch.stack([values[i, length - 1] for i, length in enumerate(valid_lengths)])
+		distrib = torch.distributions.Categorical(logits=logits)
+		if deterministic:
+			actions = logits.argmax(dim=-1)
+		else:
+			actions = distrib.sample()
+		log_probs = distrib.log_prob(actions)
+		return {
+			'actions': actions,
+			'logits': logits,
+			'log_probs': log_probs,
+			'values': values,
+		}
 
 # -----------------------------------------------------------------------------
 # Verification of Correctness
