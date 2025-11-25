@@ -3,6 +3,7 @@ from agent import N_TOKENS, N_ACTIONS
 from env import Env
 import numpy as np
 import torch
+from collections import defaultdict
 
 class NumpyBuffer:
 	"""
@@ -125,15 +126,22 @@ def compute_gae(buffers: dict[str, NumpyBuffer], gamma, lam):
 	# Compute Returns: Return = Advantage + Value
 	values[:] += advantages[:]
 
-def rollout(model: Model, batch_size = 1, device = None):
-	# 1. Setup Memory
-	# Capacity: 4 players per env * batch_size * blocks * (k_cache + v_cache)
-	tensor_buffer = TensorBuffer(batch_size * model.transformer.num_blocks * 8, model.transformer.cache_shape, device=device)
+def rollout(models: list[Model], model_ids: list[int], batch_size = 1, device = None):
+	"""
+	models: List of Model objects (must share same architecture/hyperparams).
+	model_ids: List[int] of length 4. Maps player_id -> model_index.
+	"""
+	# 1. Setup Single Shared TensorBuffer
+	# Capacity: batch_size * 4 players * num_blocks * 2 (k+v)
+	# We use models[0] for shape/config since all models are the same type.
+	ref_model = models[0]
+	capacity = batch_size * 4 * ref_model.transformer.num_blocks * 2
+	tensor_buffer = TensorBuffer(capacity, ref_model.transformer.cache_shape, device=device)
 
-	# CPU Buffers
+	# 2. Setup Shared CPU Buffers
 	# Capacity: 4 players per env * batch_size
 	np_buffers = {
-		name: NumpyBuffer(batch_size * 4, model.max_seq_len, dtype=dtype)
+		name: NumpyBuffer(batch_size * 4, ref_model.max_seq_len, dtype=dtype)
 		for name, dtype in {
 			'actions': np.int64,
 			'output_mask': bool,
@@ -143,67 +151,70 @@ def rollout(model: Model, batch_size = 1, device = None):
 			'advantages': np.float32,
 		}.items()
 	}
-	np_buffers['toks'] = NumpyBuffer(batch_size * 4, (model.max_seq_len, 2), dtype=np.int64)
-	np_buffers['logits'] = NumpyBuffer(batch_size * 4, (model.max_seq_len, model.n_actions), dtype=np.float32)
+	np_buffers['toks'] = NumpyBuffer(batch_size * 4, (ref_model.max_seq_len, 2), dtype=np.int64)
+	np_buffers['logits'] = NumpyBuffer(batch_size * 4, (ref_model.max_seq_len, ref_model.n_actions), dtype=np.float32)
 
-	# Create Objects
+	# 3. Create Trajectories
 	# traj_all[env_index][player_index]
-	traj_all = [[Trajectory(model, tensor_buffer, np_buffers) for _ in range(4)] for _ in range(batch_size)]
+	traj_all = [[Trajectory(ref_model, tensor_buffer, np_buffers) for _ in range(4)] for _ in range(batch_size)]
 	envs = [Env() for _ in range(batch_size)]
 
-	# 2. Infinite Training Loop
+	# 4. Infinite Loop
 	while True:
-		timer1 = CumulativeTimer()
-		timer2 = CumulativeTimer()
-		timer3 = CumulativeTimer()
-		timer4 = CumulativeTimer()
-		timer5 = CumulativeTimer()
 
-		# Reset Logic
+		timer = CumulativeTimer()
+		timer.__enter__()
+
+		# Reset Cache and Buffers
 		for i in range(batch_size):
 			for j in range(4):
 				for cache in traj_all[i][j].kv_cache:
 					cache.reset()
-		# Zero out masks (important because we reuse the buffer)
 		np_buffers['output_mask'].zero_()
 		for env in envs:
 			env.reset()
 		done_cnt = 0
-		steps = 0
 
-		# 3. Episode Loop
 		while done_cnt < batch_size:
-			steps += 1
-			trajs: list[Trajectory] = []
-			curr_envs: list[Env] = []
-			toks = []
-			action_masks = []
 
-			# --- A. Gather Observations ---
-			with timer1:
-				# Iterate all environments. If done, skip.
-				# This naturally reduces the batch size sent to the GPU as envs finish.
-				for traj_one, env in zip(traj_all, envs):
-					if env.done:
-						continue
-					obs = env.obs()
-					player: int = obs['player']
-					last_reward = obs['reward']
-					tok = obs['toks'] # Shape: (Len, 2)
-					action_mask = obs['action_mask']
+			# Grouping buckets: model_index -> list of data
+			# We store the environment object and trajectory directly in the bucket
+			batches: dict[int] = defaultdict(lambda: {
+				'toks': [], 'masks': [], 'lens': [], 
+				'envs': [], 'trajs': []
+			})
 
-					# Identify correct trajectory for this (env, player)
-					traj = traj_one[player]
-					# 1. Assign Reward to previous step
-					traj.set_reward(last_reward)
+			# --- A. Gather Observations (Bucket by Model) ---
+			# Iterate all environments. If done, skip.
+			for env_trajs, env in zip(traj_all, envs):
+				if env.done:
+					continue
+				obs = env.obs()
+				pid: int = obs['player']
+				mid = model_ids[pid] # Get model index for this player
 
-					trajs.append(traj)
-					curr_envs.append(env)
-					toks.append(tok)
-					action_masks.append(action_mask)
+				traj = env_trajs[pid]
 
-			# --- B. Prepare Tensors ---
-			with timer2:
+				# Store reward from previous action
+				traj.set_reward(obs['reward'])
+
+				# Add to specific model bucket
+				group = batches[mid]
+				group['toks'].append(obs['toks'])
+				group['masks'].append(obs['action_mask'])
+				group['lens'].append(len(obs['toks']))
+				group['envs'].append(env)
+				group['trajs'].append(traj)
+
+			# --- B. Process Each Model Group ---
+			for mid, group in batches.items():
+				toks = group['toks']
+				action_masks = group['masks']
+				valid_lengths = group['lens']
+				curr_envs = group['envs']
+				trajs = group['trajs']
+
+				# --- I. Prepare Tensors ---
 				# Pad sequences (Ragged Batching)
 				# toks_tensor: (Current_Batch, Max_Len_In_Batch, 2)
 				toks_tensor = torch.nn.utils.rnn.pad_sequence(
@@ -213,15 +224,12 @@ def rollout(model: Model, batch_size = 1, device = None):
 
 				action_mask_tensor = torch.from_numpy(np.stack(action_masks)).to(device)
 
-				# KV Cache: We pass the list of caches corresponding strictly 
-				# to the currently active environments/players.
+				# Collate KV cache for this specific subset of players
 				kv_cache = collate_kv_cache([traj.kv_cache for traj in trajs])
-				valid_lengths = [len(tok) for tok in toks]
 
-			# --- C. Model Inference ---
-			with timer3:
+				# --- II. Inference (Using the specific model weights) ---
 				# toks_tensor[..., 0] is Token ID, [..., 1] is Player ID
-				ret = model.get_action_and_value(
+				ret = models[mid].get_action_and_value(
 					toks_tensor[..., 0],
 					toks_tensor[..., 1],
 					action_mask_tensor,
@@ -229,17 +237,15 @@ def rollout(model: Model, batch_size = 1, device = None):
 					valid_lengths
 				)
 
-			# --- D. Move to CPU ---
-			with timer4:
+				# --- III. Move to CPU ---
 				actions = ret['actions'].tolist()
-				logits = ret['logits'].cpu().numpy()
 				log_probs = ret['log_probs'].tolist()
+				values = ret['values'].tolist()
 				# Copy logits carefully; if large vocab, this is slow.
 				# Since this is RL, N_ACTIONS usually small.
-				values = ret['values'].tolist()
+				logits = ret['logits'].cpu().numpy()
 
-			# --- E. Step & Store ---
-			with timer5:
+				# --- VI. Step Environment & Store ---
 				for env, traj, seq_len, tok, action, logit, log_prob, value in zip(
 					curr_envs, trajs, valid_lengths, toks, actions, logits, log_probs, values
 				):
@@ -247,27 +253,27 @@ def rollout(model: Model, batch_size = 1, device = None):
 					if done:
 						done_cnt += 1
 
-					# 2. Append new data
+					# Store trajectory data
 					traj.append(seq_len, tok, action, log_prob, logit, value)
 
-		# 4. Final Rewards
+		# 5. Final Rewards
 		# Since the loop breaks when env.step returns Done, the last reward 
 		# hasn't been observed via env.obs().
 		for env, trajs in zip(envs, traj_all):
 			for reward, traj in zip(env.rewards, trajs):
 				traj.set_reward(reward)
 
-		# 5. GAE Calculation
-		timer6 = CumulativeTimer()
-		with timer6:
-			compute_gae(np_buffers, 0.99, 0.95)
-		
-		print(timer1.get_total_time(), timer2.get_total_time(), timer3.get_total_time(), timer4.get_total_time(), timer5.get_total_time(), timer6.get_total_time(), sep='\n')
-		print(steps)
+		# 6. GAE Calculation
+		compute_gae(np_buffers, 0.99, 0.95)
+
+		timer.__exit__(None, None, None)
+		print(timer.get_total_time())
+
 		# TODO: Add the trajectories to dataset
 
 if __name__ == '__main__':
 	device = 'cuda'
 	model = Model(N_TOKENS, 4, N_ACTIONS, d_model=256, max_seq_len=384, num_blocks=8, num_heads=8).to(device)
+	model2 = Model(N_TOKENS, 4, N_ACTIONS, d_model=256, max_seq_len=384, num_blocks=8, num_heads=8).to(device)
 	model.eval()
-	rollout(model, 64, device)
+	rollout([model, model2], [0, 1, 0, 1], 64, device)
