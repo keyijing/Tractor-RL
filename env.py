@@ -64,8 +64,8 @@ class Env:
 			self.req, rewards, self.done = self.game.step(response)
 			for i, reward in enumerate(rewards):
 				self.rewards[i] += reward
-			if self.done:
-				print(self.rewards)
+			# if self.done:
+			# 	print(self.rewards)
 			return self.done
 		else:
 			return False
