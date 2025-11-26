@@ -3,8 +3,8 @@ from policy import random_policy
 from game import Tractor
 
 class Env:
-	def __init__(self):
-		self.game = Tractor()
+	def __init__(self, seed = None):
+		self.game = Tractor(seed)
 
 	def reset(self):
 		self.players = [Agent() for _ in range(4)]

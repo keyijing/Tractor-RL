@@ -393,7 +393,7 @@ class Model(nn.Module):
 		else:
 			probs = torch.exp(logits)
 			actions = torch.multinomial(probs, num_samples=1, replacement=True)
-		log_probs = logits.gather(1, actions).squeeze(dim=-1)
+		log_probs = logits.gather(-1, actions).squeeze(dim=-1)
 		actions = actions.squeeze(dim=-1)
 		return {
 			'actions': actions,

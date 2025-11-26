@@ -32,7 +32,7 @@ class Tractor():
 		self.snatcher = -1
 		# initializing decks
 		self.total_deck = [i for i in range(108)] 
-		random.shuffle(self.total_deck)
+		self.rand.shuffle(self.total_deck)
 		self.public_card = self.total_deck[100:] # saving 8 public cards
 		self.card_todeal = self.total_deck[:100]
 		self.player_decks = [[] for _ in range(4)]
@@ -46,7 +46,7 @@ class Tractor():
 		self.round = 0 # 轮次计数器
 
 		# Do the first round
-		return self._get_request(0)
+		return self._get_request(self.rand.randint(0, 3))
 
 
 	def step(self, response): #response: dict{'player': player_id, 'action': action}

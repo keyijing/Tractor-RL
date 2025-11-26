@@ -1,9 +1,13 @@
 from model import TensorBuffer, collate_kv_cache, Model
 from agent import N_TOKENS, N_ACTIONS
 from env import Env
+from replay_buffer import ReplayBuffer
+from model_pool import ModelPoolClient
+from timer import CumulativeTimer
 import numpy as np
 import torch
 from collections import defaultdict
+from multiprocessing import Process
 
 class NumpyBuffer:
 	"""
@@ -91,8 +95,6 @@ class Trajectory:
 		self.logits[pos] = logits
 		self.values[pos] = value
 
-from timer import CumulativeTimer
-
 def compute_gae(buffers: dict[str, NumpyBuffer], gamma, lam):
 	advantages = buffers['advantages']
 	advantages.zero_()
@@ -126,66 +128,48 @@ def compute_gae(buffers: dict[str, NumpyBuffer], gamma, lam):
 	# Compute Returns: Return = Advantage + Value
 	values[:] += advantages[:]
 
-def rollout(models: list[Model], model_ids: list[int], batch_size = 1, device = None):
+def episode_loop(
+	models: dict[str, Model],
+	model_ids: list[str],
+	traj_all: list[list[Trajectory]],
+	envs: list[Env],
+	np_buffers: dict[str, dict[str, NumpyBuffer]],
+	device,
+	config: dict
+):
 	"""
-	models: List of Model objects (must share same architecture/hyperparams).
-	model_ids: List[int] of length 4. Maps player_id -> model_index.
+	models: Dict of Model objects (must share same architecture/hyperparams).
+	model_ids: List of length 4. Maps player_id -> model_index.
 	"""
-	# 1. Setup Single Shared TensorBuffer
-	# Capacity: batch_size * 4 players * num_blocks * 2 (k+v)
-	# We use models[0] for shape/config since all models are the same type.
-	ref_model = models[0]
-	capacity = batch_size * 4 * ref_model.transformer.num_blocks * 2
-	tensor_buffer = TensorBuffer(capacity, ref_model.transformer.cache_shape, device=device)
+	timer = [CumulativeTimer() for _ in range(6)]
 
-	# 2. Setup Shared CPU Buffers
-	# Capacity: 4 players per env * batch_size
-	np_buffers = {
-		name: NumpyBuffer(batch_size * 4, ref_model.max_seq_len, dtype=dtype)
-		for name, dtype in {
-			'actions': np.int64,
-			'output_mask': bool,
-			'log_probs': np.float32,
-			'values': np.float32,
-			'rewards': np.float32,
-			'advantages': np.float32,
-		}.items()
-	}
-	np_buffers['toks'] = NumpyBuffer(batch_size * 4, (ref_model.max_seq_len, 2), dtype=np.int64)
-	np_buffers['logits'] = NumpyBuffer(batch_size * 4, (ref_model.max_seq_len, ref_model.n_actions), dtype=np.float32)
+	gamma = config['gamma']
+	lam = config['lambda']
+	batch_size = len(traj_all)
 
-	# 3. Create Trajectories
-	# traj_all[env_index][player_index]
-	traj_all = [[Trajectory(ref_model, tensor_buffer, np_buffers) for _ in range(4)] for _ in range(batch_size)]
-	envs = [Env() for _ in range(batch_size)]
+	# Reset Cache and Buffers
+	for i in range(batch_size):
+		for j in range(4):
+			for cache in traj_all[i][j].kv_cache:
+				cache.reset()
+	for np_buffer in np_buffers.values():
+		np_buffer['output_mask'].zero_()
+	for env in envs:
+		env.reset()
+	done_cnt = 0
 
-	# 4. Infinite Loop
-	while True:
+	while done_cnt < batch_size:
 
-		timer = CumulativeTimer()
-		timer.__enter__()
+		# Grouping buckets: model_index -> list of data
+		# We store the environment object and trajectory directly in the bucket
+		batches: dict[str] = defaultdict(lambda: {
+			'toks': [], 'masks': [], 'lens': [], 
+			'envs': [], 'trajs': []
+		})
 
-		# Reset Cache and Buffers
-		for i in range(batch_size):
-			for j in range(4):
-				for cache in traj_all[i][j].kv_cache:
-					cache.reset()
-		np_buffers['output_mask'].zero_()
-		for env in envs:
-			env.reset()
-		done_cnt = 0
-
-		while done_cnt < batch_size:
-
-			# Grouping buckets: model_index -> list of data
-			# We store the environment object and trajectory directly in the bucket
-			batches: dict[int] = defaultdict(lambda: {
-				'toks': [], 'masks': [], 'lens': [], 
-				'envs': [], 'trajs': []
-			})
-
-			# --- A. Gather Observations (Bucket by Model) ---
-			# Iterate all environments. If done, skip.
+		# --- A. Gather Observations (Bucket by Model) ---
+		# Iterate all environments. If done, skip.
+		with timer[0]:
 			for env_trajs, env in zip(traj_all, envs):
 				if env.done:
 					continue
@@ -206,17 +190,18 @@ def rollout(models: list[Model], model_ids: list[int], batch_size = 1, device = 
 				group['envs'].append(env)
 				group['trajs'].append(traj)
 
-			# --- B. Process Each Model Group ---
-			for mid, group in batches.items():
-				toks = group['toks']
-				action_masks = group['masks']
-				valid_lengths = group['lens']
-				curr_envs = group['envs']
-				trajs = group['trajs']
+		# --- B. Process Each Model Group ---
+		for mid, group in batches.items():
+			toks = group['toks']
+			action_masks = group['masks']
+			valid_lengths = group['lens']
+			curr_envs = group['envs']
+			trajs = group['trajs']
 
-				# --- I. Prepare Tensors ---
-				# Pad sequences (Ragged Batching)
-				# toks_tensor: (Current_Batch, Max_Len_In_Batch, 2)
+			# --- I. Prepare Tensors ---
+			# Pad sequences (Ragged Batching)
+			# toks_tensor: (Current_Batch, Max_Len_In_Batch, 2)
+			with timer[1]:
 				toks_tensor = torch.nn.utils.rnn.pad_sequence(
 					[torch.tensor(tok, dtype=torch.int64) for tok in toks],
 					batch_first=True
@@ -227,8 +212,9 @@ def rollout(models: list[Model], model_ids: list[int], batch_size = 1, device = 
 				# Collate KV cache for this specific subset of players
 				kv_cache = collate_kv_cache([traj.kv_cache for traj in trajs])
 
-				# --- II. Inference (Using the specific model weights) ---
-				# toks_tensor[..., 0] is Token ID, [..., 1] is Player ID
+			# --- II. Inference (Using the specific model weights) ---
+			# toks_tensor[..., 0] is Token ID, [..., 1] is Player ID
+			with timer[2]:
 				ret = models[mid].get_action_and_value(
 					toks_tensor[..., 0],
 					toks_tensor[..., 1],
@@ -245,7 +231,8 @@ def rollout(models: list[Model], model_ids: list[int], batch_size = 1, device = 
 				# Since this is RL, N_ACTIONS usually small.
 				logits = ret['logits'].cpu().numpy()
 
-				# --- VI. Step Environment & Store ---
+			# --- VI. Step Environment & Store ---
+			with timer[3]:
 				for env, traj, seq_len, tok, action, logit, log_prob, value in zip(
 					curr_envs, trajs, valid_lengths, toks, actions, logits, log_probs, values
 				):
@@ -256,24 +243,159 @@ def rollout(models: list[Model], model_ids: list[int], batch_size = 1, device = 
 					# Store trajectory data
 					traj.append(seq_len, tok, action, log_prob, logit, value)
 
-		# 5. Final Rewards
-		# Since the loop breaks when env.step returns Done, the last reward 
-		# hasn't been observed via env.obs().
-		for env, trajs in zip(envs, traj_all):
-			for reward, traj in zip(env.rewards, trajs):
-				traj.set_reward(reward)
+	# Final Rewards
+	# Since the loop breaks when env.step returns Done, the last reward 
+	# hasn't been observed via env.obs().
+	for env, trajs in zip(envs, traj_all):
+		for reward, traj in zip(env.rewards, trajs):
+			traj.set_reward(reward)
 
-		# 6. GAE Calculation
-		compute_gae(np_buffers, 0.99, 0.95)
+	# GAE Calculation
+	for np_buffer in np_buffers.values():
+		compute_gae(np_buffer, gamma, lam)
 
-		timer.__exit__(None, None, None)
-		print(timer.get_total_time())
+	for i in range(4):
+		print(timer[i].get_total_time())
 
-		# TODO: Add the trajectories to dataset
+class Actor(Process):
+	def __init__(self, rank: int, datasets: dict[str, ReplayBuffer], config: dict):
+		super(Actor, self).__init__()
+		self.rank = rank
+		self.datasets = datasets
+		self.config = config
+		self.batch_size: int = config['actor']['batch_size']
+		self.seed = config['actor'].get('seed')
+		self.daemon = True
+	
+	def run(self):
+		device = f'cuda:{self.rank}'
+		torch.cuda.set_device(device)
+
+		model_names = self.datasets.keys()
+
+		datasets = self.datasets
+		model_pools = {
+			name: ModelPoolClient(name)
+			for name in model_names
+		}
+		models = {
+			name: Model(N_TOKENS, 4, N_ACTIONS, **self.config['model']).to(device)
+			for name in model_names
+		}
+		versions = {}
+		for name in model_names:
+			versions[name] = model_pools[name].get_latest_model()
+			state_dict = model_pools[name].load_model(versions[name])
+			models[name].load_state_dict(state_dict)
+			models[name].eval()
+
+		# 1. Setup Single Shared TensorBuffer
+		# Capacity: batch_size * 4 players * num_blocks * 2 (k+v)
+		# We use ref_model for shape/config since all models are the same type.
+		ref_model = next(iter(models.values()))
+		capacity = self.batch_size * 4 * ref_model.transformer.num_blocks * 2
+		tensor_buffer = TensorBuffer(capacity, ref_model.transformer.cache_shape, device=device)
+
+		# 2. Setup Shared CPU Buffers
+		def _create_np_buffer(capacity: int):
+			np_buffers = {
+				name: NumpyBuffer(capacity, ref_model.max_seq_len, dtype=dtype)
+				for name, dtype in {
+					'actions': np.int64,
+					'output_mask': bool,
+					'log_probs': np.float32,
+					'values': np.float32,
+					'rewards': np.float32,
+					'advantages': np.float32,
+				}.items()
+			}
+			np_buffers['toks'] = NumpyBuffer(capacity, (ref_model.max_seq_len, 2), dtype=np.int64)
+			np_buffers['logits'] = NumpyBuffer(capacity, (ref_model.max_seq_len, ref_model.n_actions), dtype=np.float32)
+			return np_buffers
+		np_buffers = {name: _create_np_buffer(self.batch_size * 2) for name in model_names}
+
+		# 3. Create Trajectories
+		# traj_all[env_index][player_index]
+		player_model = ['best', 'avg', 'best', 'avg']
+		traj_all = [[Trajectory(ref_model, tensor_buffer, np_buffers[player_model[i]]) for i in range(4)] for _ in range(self.batch_size)]
+		envs = [Env(None if self.seed is None else self.seed + self.rank * self.batch_size + i) for i in range(self.batch_size)]
+
+		# 4. Infinite Loop
+		episode = 0
+		while True:
+
+			timer = CumulativeTimer()
+			with timer:
+				episode_loop(models, player_model, traj_all, envs, np_buffers, device, self.config)
+			print(timer.get_total_time())
+
+			# Add the trajectories to dataset
+			timer.reset()
+			with timer:
+				def _push(np_buffer: dict[str, NumpyBuffer], dataset: ReplayBuffer):
+					dataset.push({
+						k: np_buffer[k][:].copy()
+						for k in ['toks', 'actions', 'output_mask', 'log_probs', 'logits', 'values', 'advantages']
+					})
+				_push(np_buffers['best'], datasets['best'])
+				_push(np_buffers['best'], datasets['avg'])
+				_push(np_buffers['avg'], datasets['avg'])
+
+				# Update model
+				episode += 1
+				for name in model_names:
+					model_pool = model_pools[name]
+					latest = model_pool.get_latest_model()
+					if latest['id'] > versions[name]['id']:
+						state_dict = model_pool.load_model(latest)
+						versions[name] = latest
+						models[name].load_state_dict(state_dict)
+			print(timer.get_total_time())
+
+from model_pool import ModelPoolServer
 
 if __name__ == '__main__':
-	device = 'cuda'
-	model = Model(N_TOKENS, 4, N_ACTIONS, d_model=256, max_seq_len=384, num_blocks=8, num_heads=8).to(device)
-	model2 = Model(N_TOKENS, 4, N_ACTIONS, d_model=256, max_seq_len=384, num_blocks=8, num_heads=8).to(device)
-	model.eval()
-	rollout([model, model2], [0, 1, 0, 1], 64, device)
+	config = {
+		'gamma': 0.99,
+		'lambda': 0.95,
+		'replay_buffer': {
+			'capacity': 2048,
+			'episode': 32,
+			'seed': 0,
+		},
+		'model': {
+			'd_model': 16,
+			'max_seq_len': 384,
+			'num_blocks': 1,
+			'num_heads': 1,
+		},
+		'actor': {
+			'batch_size': 32,
+			'seed': 42,
+		},
+	}
+	model1 = Model(N_TOKENS, 4, N_ACTIONS, **config['model'])
+	model2 = Model(N_TOKENS, 4, N_ACTIONS, **config['model'])
+	pool1 = ModelPoolServer(4, 'best')
+	pool2 = ModelPoolServer(4, 'avg')
+	pool1.push(model1.state_dict())
+	pool2.push(model2.state_dict())
+	dataset_best = ReplayBuffer(**config['replay_buffer'])
+	dataset_avg = ReplayBuffer(**config['replay_buffer'])
+	actor = Actor(
+		0,
+		{'best': dataset_best, 'avg': dataset_avg},
+		config
+	)
+	actor.start()
+	while True:
+		batch = dataset_best.pop(512)
+		print('dataset_best pop', batch.keys())
+		batch = dataset_avg.pop(512)
+		print('dataset_avg pop', batch.keys())
+		break
+	actor.join(timeout=20)
+	if actor.is_alive():
+		print('actor is still alive')
+		actor.kill()
+		actor.join()
