@@ -18,7 +18,7 @@ class NumpyBuffer:
 			shape = (shape,)
 		self.shape = shape
 		self.capacity = capacity
-		self.buffer = np.empty(shape=(capacity,) + shape, dtype=dtype)
+		self.buffer = np.zeros(shape=(capacity,) + shape, dtype=dtype)
 		self.available = list(reversed(range(capacity)))
 
 	def zero_(self):
@@ -153,6 +153,8 @@ def episode_loop(
 			for cache in traj_all[i][j].kv_cache:
 				cache.reset()
 	for np_buffer in np_buffers.values():
+		np_buffer['toks'].zero_()
+		np_buffer['actions'].zero_()
 		np_buffer['output_mask'].zero_()
 	for env in envs:
 		env.reset()
@@ -268,18 +270,21 @@ class Actor(Process):
 		self.daemon = True
 	
 	def run(self):
+		print('actor run')
 		device = f'cuda:{self.rank}'
 		torch.cuda.set_device(device)
 
 		model_names = self.datasets.keys()
 
 		datasets = self.datasets
+		print('creating model pool client')
 		model_pools = {
 			name: ModelPoolClient(name)
 			for name in model_names
 		}
+		print('client create done')
 		models = {
-			name: Model(N_TOKENS, 4, N_ACTIONS, **self.config['model']).to(device)
+			name: Model(**self.config['model']).to(device)
 			for name in model_names
 		}
 		versions = {}
@@ -330,31 +335,30 @@ class Actor(Process):
 			print(timer.get_total_time())
 
 			# Add the trajectories to dataset
-			timer.reset()
-			with timer:
-				def _push(np_buffer: dict[str, NumpyBuffer], dataset: ReplayBuffer):
-					dataset.push({
-						k: np_buffer[k][:].copy()
-						for k in ['toks', 'actions', 'output_mask', 'log_probs', 'logits', 'values', 'advantages']
-					})
-				_push(np_buffers['best'], datasets['best'])
-				_push(np_buffers['best'], datasets['avg'])
-				_push(np_buffers['avg'], datasets['avg'])
+			def _push(np_buffer: dict[str, NumpyBuffer], dataset: ReplayBuffer):
+				dataset.push({
+					k: np_buffer[k][:].copy()
+					for k in ['toks', 'actions', 'output_mask', 'log_probs', 'logits', 'values', 'advantages']
+				})
+			_push(np_buffers['best'], datasets['best'])
+			_push(np_buffers['best'], datasets['avg'])
+			_push(np_buffers['avg'], datasets['avg'])
 
-				# Update model
-				episode += 1
-				for name in model_names:
-					model_pool = model_pools[name]
-					latest = model_pool.get_latest_model()
-					if latest['id'] > versions[name]['id']:
-						state_dict = model_pool.load_model(latest)
-						versions[name] = latest
-						models[name].load_state_dict(state_dict)
-			print(timer.get_total_time())
-
-from model_pool import ModelPoolServer
+			# Update model
+			episode += 1
+			for name in model_names:
+				model_pool = model_pools[name]
+				latest = model_pool.get_latest_model()
+				if latest['id'] > versions[name]['id']:
+					print(f'model_{name} has new model')
+					state_dict = model_pool.load_model(latest)
+					versions[name] = latest
+					models[name].load_state_dict(state_dict)
+			
+			print(f'episode {episode} done')
 
 if __name__ == '__main__':
+	from model_pool import ModelPoolServer
 	config = {
 		'gamma': 0.99,
 		'lambda': 0.95,
@@ -364,6 +368,9 @@ if __name__ == '__main__':
 			'seed': 0,
 		},
 		'model': {
+			'n_toks': N_TOKENS,
+			'n_players': 4,
+			'n_actions': N_ACTIONS,
 			'd_model': 16,
 			'max_seq_len': 384,
 			'num_blocks': 1,
@@ -374,8 +381,8 @@ if __name__ == '__main__':
 			'seed': 42,
 		},
 	}
-	model1 = Model(N_TOKENS, 4, N_ACTIONS, **config['model'])
-	model2 = Model(N_TOKENS, 4, N_ACTIONS, **config['model'])
+	model1 = Model(**config['model'])
+	model2 = Model(**config['model'])
 	pool1 = ModelPoolServer(4, 'best')
 	pool2 = ModelPoolServer(4, 'avg')
 	pool1.push(model1.state_dict())
