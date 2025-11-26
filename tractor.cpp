@@ -73,20 +73,20 @@ bool consecutive(const card_t &a, const card_t &b) {
 /**
  * Output: ascending pairs
  */
-auto get_pairs(vector<int> cards, int level) {
-	for(int &i: cards) i %= 54;
+auto get_pairs(const vector<int> &card_ids, int level) {
+	vector<card_t> cards;
+	cards.reserve(card_ids.size());
+	for(int i: card_ids) cards.push_back(id_to_card(i, level));
 	sort(cards.begin(), cards.end());
 
 	vector<card_t> pairs;
 	card_t last = {-1, 0, 0};
-	for(int i: cards) {
-		auto card = id_to_card(i, level);
+	for(auto &&card: cards)
 		if(card == last) {
 			pairs.push_back(card);
 			last = {-1, 0, 0};
 		}
 		else last = card;
-	}
 
 	return pairs;
 }
@@ -190,7 +190,7 @@ bool can_match(const vector<card_t> &pairs, vector<int> len_tractor) {
 
 /**
  * Input:
- *   cards - required to be ascending
+ *   singles, pairs - required to be ascending
  */
 bool can_follow(const vector<card_t> &singles, const vector<card_t> &pairs,
 	size_t total, const vector<int> &len_tractor) {
@@ -292,7 +292,7 @@ struct CoverState {
 struct PlayState {
 	static constexpr int kill_tok = 108, eos_tok = 109;
 	int level, major, play_count;
-	vector<int> hand_raw;
+	vector<int> hand_ids;
 	vector<card_t> hand;
 	enum {
 		LEADING,
@@ -305,10 +305,10 @@ struct PlayState {
 	vector<int> len_tractor;
 	vector<card_t> singles_leading, pairs_leading, singles_major, pairs_major;
 	PlayState(int level, int major_, vector<int> &&hand_, const vector<int> &leading):
-		level(level), major(major_), play_count(0), hand_raw(move(hand_)) {
-		sort(hand_raw.begin(), hand_raw.end());
-		hand.reserve(hand_raw.size());
-		for(int i: hand_raw)
+		level(level), major(major_), play_count(0), hand_ids(move(hand_)) {
+		sort(hand_ids.begin(), hand_ids.end());
+		hand.reserve(hand_ids.size());
+		for(int i: hand_ids)
 			hand.push_back(id_to_card(i, level));
 		sort(hand.begin(), hand.end());
 
@@ -435,10 +435,10 @@ struct PlayState {
 			for(;count-- > 0; id += 54) {
 				hand.erase(find<true>(hand, card));
 
-				auto it = find<true>(hand_raw, id);
-				if(it == hand_raw.end())
-					it = find<true>(hand_raw, id += 54);
-				hand_raw.erase(it);
+				auto it = find<true>(hand_ids, id);
+				if(it == hand_ids.end())
+					it = find<true>(hand_ids, id += 54);
+				hand_ids.erase(it);
 
 				ids.push_back(id);
 			}
@@ -548,137 +548,8 @@ struct PlayState {
 	}
 };
 
-struct JudgerState {
-	int level, major;
-	int suit, card_num, max_card, winner;
-	vector<int> len_tractor;
-	vector<pair<card_t, card_t>> tractor_card;
-	JudgerState(int _leval, int _major): level(_leval), major(_major) {}
-
-	// 辅助变量
-	int max_num[13];
-	vector<card_t> cards, hand;
-	int get_num(card_t card) {
-		auto [type, suit, number] = card;
-		if(type == 0) return number;
-		else if(type == 1) return suit == major ? 13 : 12;
-		else return number + 14;
-	}
-
-	auto parse_leader(int playerpos, vector<int> ids, array<vector<int>, 4> raw_hand) {
-		fill(max_num, max_num + 13, -1);
-
-		max_card = -1;
-		card_num = ids.size();
-		len_tractor.clear();
-		tractor_card.clear();
-		winner = playerpos;
-
-		cards.clear(); cards.reserve(ids.size());
-		for(int i: ids) cards.push_back(id_to_card(i, level));
-		sort(cards.begin(), cards.end());
-		suit = is_major(cards[0], major) ? -1 : get<SUIT>(cards[0]);
-		// 对于每个 i，找到连续 i 张牌最大的牌最大是多少
-		for(int player = 0; player < 4; player++) if(player != playerpos) {
-			hand.clear(); hand.reserve(raw_hand[player].size());
-			for(int i: raw_hand[player]) hand.push_back(id_to_card(i, level));
-			sort(hand.begin(), hand.end());
-			card_t last = {-1, 0, 0}, last_pair = {-1, 0, 0};
-			int len = 0;
-			for(auto &&card: hand) {
-				if(!match_suit(card, suit, major)) continue;
-				int num = get_num(card);
-				if(card == last) {
-					if(consecutive(card, last_pair)) len++;
-					else len = 1;
-					max_num[len] = max(max_num[len], num);
-					last_pair = card;
-				}
-				max_num[0] = max(max_num[0], num);
-				last = card;
-			}
-		}
-		for(int i = 11; i >= 0; i--) max_num[i] = max(max_num[i], max_num[i + 1]);
-		// 判断甩牌是否合法
-		int len = 0, last_num = 20, last_pair_num = 20, failcnt = 0, min_fail_id = -1;
-		card_t last = {-1, 0, 0}, last_pair = {-1, 0, 0}, min_fail_card = {3, 0, 0}, last_pair_first;
-		for(auto &&card: cards) {
-			if(card == last) {
-				if(consecutive(card, last_pair)) len++;
-				else {
-					if(len) {
-						len_tractor.push_back(len);
-						tractor_card.emplace_back(last_pair_first, last_pair);
-					}
-					len = 1;
-					last_pair_first = card;
-				}
-				last_pair = card;
-				last = {-1, 0, 0};
-			} else {
-				if(get<TYPE>(last) != -1) {
-					len_tractor.push_back(0);
-					tractor_card.emplace_back(last, last);
-				}
-				last = card;
-			}
-		}
-		if(len) {
-			len_tractor.push_back(len);
-			tractor_card.emplace_back(last_pair_first, last_pair);
-		}
-		if(get<TYPE>(last) != -1) {
-			len_tractor.push_back(0);
-			tractor_card.emplace_back(last, last);
-		}
-		if(len_tractor.size() <= 1) return make_pair(move(ids), 0);
-		for(auto &&[len, card_pair]: views::zip(len_tractor, tractor_card)) {
-			auto [first_card, last_card] = card_pair;
-			int num = get_num(last_card);
-			if(num < max_num[len]) {
-				failcnt += len;
-				if(get<SUIT>(first_card) == major) get<SUIT>(first_card) = 4;
-				if(first_card < min_fail_card) {
-					min_fail_card = first_card;
-				}
-			}
-		}
-		if(failcnt == 0) return make_pair(move(ids), 0);
-		// 甩牌失败
-		if(get<SUIT>(min_fail_card) == major) get<SUIT>(min_fail_card) = major;
-		int id = card_to_id(min_fail_card, level);
-		if(find(ids.begin(), ids.end(), id) != ids.end()) id += 54;
-		ids = {id};
-		return make_pair(move(ids), failcnt);
-	}
-
-	void parse_follow(int playerpos, vector<int> ids) {
-		cards.clear(); cards.reserve(ids.size());
-		for(int i: ids) cards.push_back(id_to_card(i, level));
-		sort(cards.begin(), cards.end());
-		if(len_tractor.size() <= 1) { // 不是甩牌
-			bool all_major = true, same_suit = true;
-			for(auto &&card: cards) {
-				all_major &= is_major(card, major);
-				same_suit &= match_suit(card, suit, major);
-			}
-			if(suit < 0) {
-				if(!all_major) return;
-				
-			} else {
-				
-			}
-		}
-	}
-};
-
 PYBIND11_MODULE(tractor, m) {
     m.doc() = "C++ backend for Tractor";
-
-	m.def("tok_to_card", &tok_to_card);
-	m.def("card_to_tok", &card_to_tok);
-	m.def("id_to_card", &id_to_card);
-	m.def("card_to_id", &card_to_id);
 
 	py::class_<DealState>(m, "DealState")
 		.def(py::init<int>())
