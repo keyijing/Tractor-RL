@@ -256,8 +256,8 @@ def episode_loop(
 	for np_buffer in np_buffers.values():
 		compute_gae(np_buffer, gamma, lam)
 
-	for i in range(4):
-		print(timer[i].get_total_time())
+	# for i in range(4):
+	# 	print(timer[i].get_total_time())
 
 class Actor(Process):
 	def __init__(self, rank: int, datasets: dict[str, ReplayBuffer], config: dict):
@@ -272,7 +272,6 @@ class Actor(Process):
 	def run(self):
 		print('actor run')
 		device = f'cuda:{self.rank}'
-		torch.cuda.set_device(device)
 
 		model_names = self.datasets.keys()
 
@@ -332,7 +331,7 @@ class Actor(Process):
 			timer = CumulativeTimer()
 			with timer:
 				episode_loop(models, player_model, traj_all, envs, np_buffers, device, self.config)
-			print(timer.get_total_time())
+			# print(timer.get_total_time())
 
 			# Add the trajectories to dataset
 			def _push(np_buffer: dict[str, NumpyBuffer], dataset: ReplayBuffer):
@@ -350,12 +349,11 @@ class Actor(Process):
 				model_pool = model_pools[name]
 				latest = model_pool.get_latest_model()
 				if latest['id'] > versions[name]['id']:
-					print(f'model_{name} has new model')
 					state_dict = model_pool.load_model(latest)
 					versions[name] = latest
 					models[name].load_state_dict(state_dict)
 			
-			print(f'episode {episode} done')
+			# print(f'episode {episode} done')
 
 if __name__ == '__main__':
 	from model_pool import ModelPoolServer

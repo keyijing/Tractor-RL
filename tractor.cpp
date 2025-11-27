@@ -7,7 +7,6 @@
 #include <utility>
 #include <tuple>
 #include <vector>
-#include <ranges>
 
 namespace py = pybind11;
 using namespace std;

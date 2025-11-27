@@ -67,6 +67,10 @@ class SLLearner:
 
 		for _ in range(self.config['epochs']):
 			for tok, output_mask, old_logit in dataloader:
+				total = output_mask.sum()
+				def _masked_mean(x: torch.Tensor):
+					return torch.where(output_mask, x, 0).sum() / total
+
 				action_mask = old_logit == -torch.inf
 				target = F.softmax(old_logit, dim=-1)
 				logit, _ = self.model(tok[..., 0], tok[..., 1])
@@ -74,7 +78,7 @@ class SLLearner:
 				# Cross entropy expects (B, C, Seq)
 				logit = logit.transpose(-1, -2)
 				target = target.transpose(-1, -2)
-				loss = F.cross_entropy(logit, target, reduction='none')[output_mask].mean()
+				loss = _masked_mean(F.cross_entropy(logit, target, reduction='none'))
 
 				self.optimizer.zero_grad()
 				loss.backward()
@@ -135,6 +139,10 @@ class RLLearner:
 
 		for _ in range(self.config['epochs']):
 			for tok, action, output_mask, old_log_prob, old_logit, target, adv in dataloader:
+				total = output_mask.sum()
+				def _masked_mean(x: torch.Tensor):
+					return torch.where(output_mask, x, 0).sum() / total
+
 				action_mask = old_logit == -torch.inf
 				logit, value = self.model(tok[..., 0], tok[..., 1])
 				logit = torch.where(action_mask, logit, -torch.inf)
@@ -143,10 +151,10 @@ class RLLearner:
 				ratio = torch.exp(log_prob - old_log_prob)
 				surr1 = ratio * adv
 				surr2 = torch.clip(ratio, 1 - eps, 1 + eps) * adv
-				policy_loss = -torch.min(surr1, surr2)[output_mask].mean()
-				value_loss = F.mse_loss(value, target, reduction='none')[output_mask].mean()
-				entropy_loss = -entropy(logit)[output_mask].mean()
-				KL_div = KL_divergence(logit, old_logit)[output_mask].mean()
+				policy_loss = -_masked_mean(torch.min(surr1, surr2))
+				value_loss = _masked_mean(F.mse_loss(value, target, reduction='none'))
+				entropy_loss = -_masked_mean(entropy(logit))
+				KL_div = _masked_mean(KL_divergence(logit, old_logit))
 				loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss
 
 				self.optimizer.zero_grad()
@@ -163,8 +171,12 @@ class RLLearner:
 			torch.save(self.model.state_dict(), path)
 
 class Learner(Process):
-	def __init__(self, models: dict[str, Model], replay_buffers: dict[str, ReplayBuffer], device, config: dict):
+	def __init__(self, replay_buffers: dict[str, ReplayBuffer], device, config: dict):
 		super(Learner, self).__init__()
+		models = {
+			name: Model(**config['model'])
+			for name in replay_buffers
+		}
 		self.sl_learner = SLLearner('avg', models, replay_buffers, device, config['sl'])
 		self.rl_learner = RLLearner('best', models, replay_buffers, device, config['rl'])
 
