@@ -3,8 +3,10 @@ from model_pool import ModelPoolServer
 from model import Model
 from multiprocessing import Process
 from pathlib import Path
+import wandb
 import threading
 import time
+from datetime import datetime
 import torch
 from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
@@ -45,7 +47,7 @@ class SLLearner:
 		self.model_pool.push(self.model.state_dict())
 		self.optimizer = torch.optim.Adam(self.model.parameters(), **config['optim'])
 		self.iterations = 0
-	
+
 	def step(self):
 		batch_size = self.config['batch_size']
 		mini_batch_size = self.config['mini_batch_size']
@@ -65,6 +67,10 @@ class SLLearner:
 		dataset = TensorDataset(toks, output_masks, logits)
 		dataloader = DataLoader(dataset, batch_size=mini_batch_size, shuffle=True)
 
+		stats = {
+			'loss': []
+		}
+
 		for _ in range(self.config['epochs']):
 			for tok, output_mask, old_logit in dataloader:
 				action_mask = old_logit == -torch.inf
@@ -75,6 +81,8 @@ class SLLearner:
 				logit = logit.transpose(-1, -2)
 				target = target.transpose(-1, -2)
 				loss = F.cross_entropy(logit, target, reduction='none')[output_mask].mean()
+
+				stats['loss'].append(loss.item())
 
 				self.optimizer.zero_grad()
 				loss.backward()
@@ -89,6 +97,10 @@ class SLLearner:
 			path = Path(self.config['ckpt_save_path'], f'{self.iterations}.pt')
 			torch.save(self.model.state_dict(), path)
 
+		return {
+			key: sum(value) / len(value) for key, value in stats.items()
+		}
+
 class RLLearner:
 	def __init__(self, name: str, models: dict[str, Model], replay_buffers: dict[str, ReplayBuffer], device, config: dict):
 		self.name = name
@@ -100,7 +112,7 @@ class RLLearner:
 		self.model_pool.push(self.model.state_dict())
 		self.optimizer = torch.optim.Adam(self.model.parameters(), **config['optim'])
 		self.iterations = 0
-	
+
 	def step(self):
 		eps = self.config['eps']
 		value_coef = self.config['value_coef']
@@ -133,6 +145,14 @@ class RLLearner:
 		dataset = TensorDataset(toks, actions, output_masks, log_probs, logits, targets, advantages)
 		dataloader = DataLoader(dataset, batch_size=mini_batch_size, shuffle=True)
 
+		stats = {
+			'policy_loss': [],
+			'value_loss': [],
+			'entropy_loss': [],
+			'total_loss': [],
+			'kl_div': [],
+		}
+
 		for _ in range(self.config['epochs']):
 			for tok, action, output_mask, old_log_prob, old_logit, target, adv in dataloader:
 				action_mask = old_logit == -torch.inf
@@ -149,6 +169,12 @@ class RLLearner:
 				KL_div = KL_divergence(logit, old_logit)[output_mask].mean()
 				loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss
 
+				stats['policy_loss'].append(policy_loss.item())
+				stats['value_loss'].append(value_loss.item())
+				stats['entropy_loss'].append(entropy_loss.item())
+				stats['total_loss'].append(loss.item())
+				stats['kl_div'].append(KL_div.item())
+
 				self.optimizer.zero_grad()
 				loss.backward()
 				if 'clip_grad' in self.config:
@@ -162,9 +188,14 @@ class RLLearner:
 			path = Path(self.config['ckpt_save_path'], f'{self.iterations}.pt')
 			torch.save(self.model.state_dict(), path)
 
+		return {
+			key: sum(value) / len(value) for key, value in stats.items()
+		}
+
 class Learner(Process):
 	def __init__(self, models: dict[str, Model], replay_buffers: dict[str, ReplayBuffer], device, config: dict):
 		super(Learner, self).__init__()
+		self.config = config
 		self.sl_learner = SLLearner('avg', models, replay_buffers, device, config['sl'])
 		self.rl_learner = RLLearner('best', models, replay_buffers, device, config['rl'])
 
@@ -175,8 +206,16 @@ class Learner(Process):
 			time.sleep(0.1)
 
 	def run(self):
+		time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+		wandb.init(project='Tractor-RL', name=f'Learner-{time}', config=self.config)
+
 		thread = threading.Thread(target=self._flush, daemon=True)
 		thread.start()
 		while True:
-			self.rl_learner.step()
-			self.sl_learner.step()
+			rl_stats = self.rl_learner.step()
+			sl_stats = self.sl_learner.step()
+
+			wandb.log({
+				**{f'rl/{key}': value for key, value in rl_stats.items()},
+				**{f'sl/{key}': value for key, value in sl_stats.items()},
+			})
