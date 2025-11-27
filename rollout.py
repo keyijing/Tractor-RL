@@ -60,7 +60,7 @@ class Trajectory:
 		self.rewards = _allocate('rewards')
 
 		self.max_len = self.toks.shape[0]
-	
+
 	def set_reward(self, last_reward: float):
 		"""
 		Assigns the reward received in the CURRENT observation to the PREVIOUS step's action.
@@ -72,7 +72,7 @@ class Trajectory:
 		if pos >= 0:
 			assert self.output_mask[pos] == True
 			self.rewards[pos] = last_reward / 10
-	
+
 	def append(self, seq_len: int, toks: list, action: int, log_prob: float, logits: np.ndarray, value: float):
 		"""
 		Records the data for the current step AFTER model inference.
@@ -256,9 +256,6 @@ def episode_loop(
 	for np_buffer in np_buffers.values():
 		compute_gae(np_buffer, gamma, lam)
 
-	# for i in range(4):
-	# 	print(timer[i].get_total_time())
-
 class Actor(Process):
 	def __init__(self, rank: int, datasets: dict[str, ReplayBuffer], config: dict):
 		super(Actor, self).__init__()
@@ -268,7 +265,7 @@ class Actor(Process):
 		self.batch_size: int = config['actor']['batch_size']
 		self.seed = config['actor'].get('seed')
 		self.daemon = True
-	
+
 	def run(self):
 		print('actor run')
 		device = f'cuda:{self.rank}'
@@ -352,7 +349,7 @@ class Actor(Process):
 					state_dict = model_pool.load_model(latest)
 					versions[name] = latest
 					models[name].load_state_dict(state_dict)
-			
+
 			# print(f'episode {episode} done')
 
 if __name__ == '__main__':

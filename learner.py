@@ -5,8 +5,10 @@ from multiprocessing import Process
 from pathlib import Path
 import wandb
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 from datetime import datetime
+import numpy as np
 import torch
 from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
@@ -43,12 +45,12 @@ def masked_normalize(advantages: torch.Tensor, output_mask: torch.Tensor, eps = 
 	return (advantages - mean) / std
 
 class SLLearner:
-	def __init__(self, name: str, models: dict[str, Model], replay_buffers: dict[str, ReplayBuffer], device, config: dict):
+	def __init__(self, name: str, models: dict[str, Model], replay_buffers: dict[str, ReplayBuffer], config: dict):
 		self.name = name
-		self.model = models[name].to(device)
-		self.replay_buffer = replay_buffers[name]
-		self.device = device
 		self.config = config
+		self.device = config['device']
+		self.model = models[name].to(self.device)
+		self.replay_buffer = replay_buffers[name]
 		self.model_pool = ModelPoolServer(config['model_pool_size'], name)
 		self.model_pool.push(self.model.state_dict())
 		self.optimizer = torch.optim.AdamW(self.model.parameters(), **config['optim'])
@@ -63,9 +65,9 @@ class SLLearner:
 		toks = torch.tensor(batch['toks'], device=self.device)
 		output_masks = torch.tensor(batch['output_mask'], device=self.device)
 		logits = torch.tensor(batch['logits'], device=self.device)
-		print(f'{toks.shape=}')
-		print(f'{output_masks.shape=}')
-		print(f'{logits.shape=}')
+		# print(f'{toks.shape=}')
+		# print(f'{output_masks.shape=}')
+		# print(f'{logits.shape=}')
 
 		print(f'SL Iteration {self.iterations}, replay buffer in {self.replay_buffer.stats["sample_in"]} out {self.replay_buffer.stats["sample_out"]}')
 		self.model.train(True) # Training mode
@@ -109,12 +111,12 @@ class SLLearner:
 		}
 
 class RLLearner:
-	def __init__(self, name: str, models: dict[str, Model], replay_buffers: dict[str, ReplayBuffer], device, config: dict):
+	def __init__(self, name: str, models: dict[str, Model], replay_buffers: dict[str, ReplayBuffer], config: dict):
 		self.name = name
-		self.model = models[name].to(device)
-		self.replay_buffer = replay_buffers[name]
-		self.device = device
 		self.config = config
+		self.device = config['device']
+		self.model = models[name].to(self.device)
+		self.replay_buffer = replay_buffers[name]
 		self.model_pool = ModelPoolServer(config['model_pool_size'], name)
 		self.model_pool.push(self.model.state_dict())
 		self.optimizer = torch.optim.AdamW(self.model.parameters(), **config['optim'])
@@ -138,13 +140,14 @@ class RLLearner:
 		targets = torch.tensor(batch['values'], device=self.device)
 		advantages = torch.tensor(batch['advantages'], device=self.device)
 		advantages = masked_normalize(advantages, output_masks)
-		print(f'{toks.shape=}')
-		print(f'{actions.shape=}')
-		print(f'{output_masks.shape=}')
-		print(f'{log_probs.shape=}')
-		print(f'{logits.shape=}')
-		print(f'{targets.shape=}')
-		print(f'{advantages.shape=}')
+		reward = np.mean(np.where(batch['output_mask'], batch['rewards'], 0).sum(axis=-1))
+		# print(f'{toks.shape=}')
+		# print(f'{actions.shape=}')
+		# print(f'{output_masks.shape=}')
+		# print(f'{log_probs.shape=}')
+		# print(f'{logits.shape=}')
+		# print(f'{targets.shape=}')
+		# print(f'{advantages.shape=}')
 
 		print(f'RL Iteration {self.iterations}, replay buffer in {self.replay_buffer.stats["sample_in"]} out {self.replay_buffer.stats["sample_out"]}')
 		self.model.train(True) # Training mode
@@ -153,6 +156,7 @@ class RLLearner:
 		dataloader = DataLoader(dataset, batch_size=mini_batch_size, shuffle=True)
 
 		stats = {
+			'reward': [reward],
 			'policy_loss': [],
 			'value_loss': [],
 			'entropy_loss': [],
@@ -204,15 +208,10 @@ class RLLearner:
 		}
 
 class Learner(Process):
-	def __init__(self, replay_buffers: dict[str, ReplayBuffer], device, config: dict):
+	def __init__(self, replay_buffers: dict[str, ReplayBuffer], config: dict):
 		super(Learner, self).__init__()
-		models = {
-			name: Model(**config['model'])
-			for name in replay_buffers
-		}
+		self.replay_buffers = replay_buffers
 		self.config = config
-		self.sl_learner = SLLearner('avg', models, replay_buffers, device, config['sl'])
-		self.rl_learner = RLLearner('best', models, replay_buffers, device, config['rl'])
 
 	def _flush(self):
 		while True:
@@ -225,11 +224,21 @@ class Learner(Process):
 			time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
 			wandb.init(project='Tractor-RL', name=f'Learner-{time}', config=self.config)
 
+		models = {
+			name: Model(**self.config['model'])
+			for name in self.replay_buffers
+		}
+		self.sl_learner = SLLearner('avg', models, self.replay_buffers, self.config['sl'])
+		self.rl_learner = RLLearner('best', models, self.replay_buffers, self.config['rl'])
+
 		thread = threading.Thread(target=self._flush, daemon=True)
 		thread.start()
 		while True:
-			rl_stats = self.rl_learner.step()
-			sl_stats = self.sl_learner.step()
+			with ThreadPoolExecutor(max_workers=2) as exec:
+				sl = exec.submit(self.sl_learner.step)
+				rl = exec.submit(self.rl_learner.step)
+				sl_stats = sl.result()
+				rl_stats = rl.result()
 
 			if self.config.get('log') == 'wandb':
 				wandb.log({

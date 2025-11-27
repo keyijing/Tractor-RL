@@ -15,6 +15,7 @@ config = {
 		'seed': 0,
 	},
 	'sl': {
+		'device': 'cuda:0',
 		'model_pool_size': 1,
 		'batch_size': 1024,
 		'mini_batch_size': 128,
@@ -28,6 +29,7 @@ config = {
 		},
 	},
 	'rl': {
+		'device': 'cuda:7',
 		'model_pool_size': 1,
 		'eps': 0.2,
 		'value_coef': 0.5,
@@ -70,8 +72,7 @@ if __name__ == '__main__':
 		name: ReplayBuffer(**config['replay_buffer'])
 		for name in ['best', 'avg']
 	}
-	device = 'cuda:7'
-	learner = Learner(datasets, device, config)
+	learner = Learner(datasets, config)
 	actors = [Actor(i + 2, datasets, config) for i in range(config['actor']['n_actors'])]
 
 	learner.start()
