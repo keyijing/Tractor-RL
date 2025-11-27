@@ -31,6 +31,12 @@ def KL_divergence(logits: torch.Tensor, old_logits: torch.Tensor):
 	logits = torch.where(probs == 0, 0, logits - old_logits)
 	return (probs * logits).sum(dim=-1)
 
+def cross_entropy(logits: torch.Tensor, target: torch.Tensor):
+	logits = logits.log_softmax(dim=-1)
+	# Mask out 0 probabilities to void Nan from 0*-inf
+	logits = torch.where(target == 0, 0, logits)
+	return -(target * logits).sum(dim=-1)
+
 def masked_normalize(advantages: torch.Tensor, output_mask: torch.Tensor, eps = 1e-5):
 	mean = advantages[output_mask].mean()
 	std = advantages[output_mask].std() + eps
@@ -45,7 +51,7 @@ class SLLearner:
 		self.config = config
 		self.model_pool = ModelPoolServer(config['model_pool_size'], name)
 		self.model_pool.push(self.model.state_dict())
-		self.optimizer = torch.optim.Adam(self.model.parameters(), **config['optim'])
+		self.optimizer = torch.optim.AdamW(self.model.parameters(), **config['optim'])
 		self.iterations = 0
 
 	def step(self):
@@ -77,14 +83,11 @@ class SLLearner:
 				def _masked_mean(x: torch.Tensor):
 					return torch.where(output_mask, x, 0).sum() / total
 
-				action_mask = old_logit == -torch.inf
+				action_mask = old_logit != -torch.inf
 				target = F.softmax(old_logit, dim=-1)
 				logit, _ = self.model(tok[..., 0], tok[..., 1])
 				logit = torch.where(action_mask, logit, -torch.inf)
-				# Cross entropy expects (B, C, Seq)
-				logit = logit.transpose(-1, -2)
-				target = target.transpose(-1, -2)
-				loss = _masked_mean(F.cross_entropy(logit, target, reduction='none'))
+				loss = _masked_mean(cross_entropy(logit, target))
 
 				stats['loss'].append(loss.item())
 
@@ -114,7 +117,7 @@ class RLLearner:
 		self.config = config
 		self.model_pool = ModelPoolServer(config['model_pool_size'], name)
 		self.model_pool.push(self.model.state_dict())
-		self.optimizer = torch.optim.Adam(self.model.parameters(), **config['optim'])
+		self.optimizer = torch.optim.AdamW(self.model.parameters(), **config['optim'])
 		self.iterations = 0
 
 	def step(self):
@@ -163,7 +166,7 @@ class RLLearner:
 				def _masked_mean(x: torch.Tensor):
 					return torch.where(output_mask, x, 0).sum() / total
 
-				action_mask = old_logit == -torch.inf
+				action_mask = old_logit != -torch.inf
 				logit, value = self.model(tok[..., 0], tok[..., 1])
 				logit = torch.where(action_mask, logit, -torch.inf)
 				logit = F.log_softmax(logit, dim=-1)
@@ -218,8 +221,9 @@ class Learner(Process):
 			time.sleep(0.1)
 
 	def run(self):
-		time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
-		wandb.init(project='Tractor-RL', name=f'Learner-{time}', config=self.config)
+		if self.config.get('log') == 'wandb':
+			time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
+			wandb.init(project='Tractor-RL', name=f'Learner-{time}', config=self.config)
 
 		thread = threading.Thread(target=self._flush, daemon=True)
 		thread.start()
@@ -227,7 +231,11 @@ class Learner(Process):
 			rl_stats = self.rl_learner.step()
 			sl_stats = self.sl_learner.step()
 
-			wandb.log({
-				**{f'rl/{key}': value for key, value in rl_stats.items()},
-				**{f'sl/{key}': value for key, value in sl_stats.items()},
-			})
+			if self.config.get('log') == 'wandb':
+				wandb.log({
+					**{f'rl/{key}': value for key, value in rl_stats.items()},
+					**{f'sl/{key}': value for key, value in sl_stats.items()},
+				})
+			else:
+				print(f'{rl_stats = }')
+				print(f'{sl_stats = }')

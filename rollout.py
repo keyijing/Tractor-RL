@@ -71,7 +71,7 @@ class Trajectory:
 		pos = self.kv_cache[0].curr_pos - 1
 		if pos >= 0:
 			assert self.output_mask[pos] == True
-			self.rewards[pos] = last_reward
+			self.rewards[pos] = last_reward / 10
 	
 	def append(self, seq_len: int, toks: list, action: int, log_prob: float, logits: np.ndarray, value: float):
 		"""
@@ -337,7 +337,7 @@ class Actor(Process):
 			def _push(np_buffer: dict[str, NumpyBuffer], dataset: ReplayBuffer):
 				dataset.push({
 					k: np_buffer[k][:].copy()
-					for k in ['toks', 'actions', 'output_mask', 'log_probs', 'logits', 'values', 'advantages']
+					for k in ['toks', 'actions', 'output_mask', 'log_probs', 'logits', 'values', 'advantages', 'rewards']
 				})
 			_push(np_buffers['best'], datasets['best'])
 			_push(np_buffers['best'], datasets['avg'])

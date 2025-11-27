@@ -8,6 +8,7 @@ import multiprocessing as mp
 config = {
 	'gamma': 0.98,
 	'lambda': 0.95,
+	# 'log': 'wandb',
 	'replay_buffer': {
 		'capacity': 5120,
 		'episode': 64,
@@ -16,30 +17,31 @@ config = {
 	'sl': {
 		'model_pool_size': 1,
 		'batch_size': 1024,
-		'mini_batch_size': 64,
+		'mini_batch_size': 128,
 		'epochs': 1,
 		'clip_grad': 1,
 		'ckpt_save_interval': 50,
 		'ckpt_save_path': 'checkpoint/model_avg',
 		'optim': {
-			'lr': 2e-5,
-			'eps': 1e-5,
+			'lr': 1e-4,
+			'weight_decay': 1e-2,
 		},
 	},
 	'rl': {
 		'model_pool_size': 1,
 		'eps': 0.2,
 		'value_coef': 0.5,
-		'entropy_coef': 0.01,
+		'entropy_coef': 0.005,
 		'batch_size': 1024,
-		'mini_batch_size': 64,
-		'epochs': 4,
+		'mini_batch_size': 128,
+		'epochs': 3,
 		'clip_grad': 1,
 		'ckpt_save_interval': 50,
 		'ckpt_save_path': 'checkpoint/model_best',
 		'optim': {
 			'lr': 1e-5,
 			'eps': 1e-5,
+			'weight_decay': 0,
 		}
 	},
 	'model': {
