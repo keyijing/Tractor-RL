@@ -140,7 +140,7 @@ class RLLearner:
 		targets = torch.tensor(batch['values'], device=self.device)
 		advantages = torch.tensor(batch['advantages'], device=self.device)
 		advantages = masked_normalize(advantages, output_masks)
-		reward = np.mean(np.where(batch['output_mask'], batch['rewards'], 0).sum(axis=-1))
+		reward = np.mean(np.where(batch['output_mask'], batch['rewards'], 0).sum(axis=-1)).item()
 		# print(f'{toks.shape=}')
 		# print(f'{actions.shape=}')
 		# print(f'{output_masks.shape=}')
@@ -233,18 +233,24 @@ class Learner(Process):
 
 		thread = threading.Thread(target=self._flush, daemon=True)
 		thread.start()
-		while True:
-			with ThreadPoolExecutor(max_workers=2) as exec:
-				sl = exec.submit(self.sl_learner.step)
-				rl = exec.submit(self.rl_learner.step)
-				sl_stats = sl.result()
-				rl_stats = rl.result()
+		try:
+			while True:
+				with ThreadPoolExecutor(max_workers=2) as exec:
+					sl = exec.submit(self.sl_learner.step)
+					rl = exec.submit(self.rl_learner.step)
+					sl_stats = sl.result()
+					rl_stats = rl.result()
 
+				if self.config.get('log') == 'wandb':
+					wandb.log({
+						**{f'rl/{key}': value for key, value in rl_stats.items()},
+						**{f'sl/{key}': value for key, value in sl_stats.items()},
+					})
+				else:
+					print(f'{rl_stats = }')
+					print(f'{sl_stats = }')
+		except Exception as e:
+			print(e)
+		finally:
 			if self.config.get('log') == 'wandb':
-				wandb.log({
-					**{f'rl/{key}': value for key, value in rl_stats.items()},
-					**{f'sl/{key}': value for key, value in sl_stats.items()},
-				})
-			else:
-				print(f'{rl_stats = }')
-				print(f'{sl_stats = }')
+				wandb.finish()
