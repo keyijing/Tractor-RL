@@ -1,3 +1,4 @@
+from typing import List, Dict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -63,7 +64,7 @@ class KVCache:
 	Batch operator for KVCacheRows. 
 	Manages vectorized updates and retrievals for a specific layer.
 	"""
-	def __init__(self, caches: list[KVCacheRow]):
+	def __init__(self, caches: List[KVCacheRow]):
 		self.caches = caches
 		self.buffer = caches[0].buffer
 		self.batch_size = len(caches)
@@ -73,7 +74,7 @@ class KVCache:
 		self.k_indices = torch.tensor([c.k_index for c in caches], dtype=torch.int64, device=self.device)
 		self.v_indices = torch.tensor([c.v_index for c in caches], dtype=torch.int64, device=self.device)
 
-	def update(self, k_new: torch.Tensor, v_new: torch.Tensor, pos_ids: torch.Tensor, valid_lengths: list[int]):
+	def update(self, k_new: torch.Tensor, v_new: torch.Tensor, pos_ids: torch.Tensor, valid_lengths: List[int]):
 		"""
 		k_new, v_new: (Batch, Heads, Seq_Len, Dim)
 		pos_ids: (Batch, Seq_Len)- Target write positions
@@ -105,7 +106,7 @@ class KVCache:
 	def get_offsets(self):
 		return torch.tensor([cache.curr_pos for cache in self.caches], dtype=torch.int64, device=self.device)
 
-def collate_kv_cache(kv_cache_rows_list: list[list[KVCacheRow]]):
+def collate_kv_cache(kv_cache_rows_list: List[List[KVCacheRow]]):
 	"""
 	Converts a list of [Block0_Row, Block1_Row...] into a list of [Block0_BatchCache, Block1_BatchCache...]
 	"""
@@ -180,7 +181,7 @@ class FlashMultiHeadAttention(nn.Module):
 
 		self.rope = RoPE(self.head_dim, maxlen)
 
-	def forward(self, x: torch.Tensor, attn_mask = None, pos_ids = None, kv_cache: KVCache = None, valid_lengths: list[int] = None):
+	def forward(self, x: torch.Tensor, attn_mask = None, pos_ids = None, kv_cache: KVCache = None, valid_lengths: List[int] = None):
 		"""
 		x: (Batch, Seq_Len, D_Model)
 		kv_cache: KVCache object for this specific layer
@@ -222,12 +223,26 @@ class FlashMultiHeadAttention(nn.Module):
 			attn_mask = None
 
 		# 3. Attention Dispatch
-		attn_output = F.scaled_dot_product_attention(
-			Q, K, V,
-			dropout_p=self.dropout_rate if self.training else 0.0, 
-			attn_mask=attn_mask,
-			is_causal=is_causal
-		)
+		if hasattr(F, 'scaled_dot_product_attention'):
+			attn_output = F.scaled_dot_product_attention(
+				Q, K, V,
+				dropout_p=self.dropout_rate if self.training else 0.0, 
+				attn_mask=attn_mask,
+				is_causal=is_causal
+			)
+		else:
+			if is_causal:
+				attn_mask: torch.Tensor = torch.ones((seq_len, seq_len), dtype=torch.bool, device=x.device)
+				attn_mask = attn_mask.tril().unsqueeze(0)
+
+			scale = (self.head_dim) ** -0.5
+			scores: torch.Tensor = torch.matmul(Q, K.transpose(-2, -1)) * scale
+
+			scores.masked_fill_(attn_mask.logical_not(), -torch.inf)
+
+			attn_weights = F.softmax(scores, dim=-1)
+			attn_weights = F.dropout(attn_weights, p=self.dropout_rate, training=self.training)
+			attn_output = torch.matmul(attn_weights, V)
 
 		# 4. Output Projection
 		attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, seq_len, -1)
@@ -282,7 +297,7 @@ class Transformer(nn.Module):
 		"""
 		return [KVCacheRow(buffer) for _ in range(self.num_blocks)]
 
-	def forward(self, seqs: torch.Tensor, kv_caches: list[KVCache] = None, valid_lengths: list[int] = None):
+	def forward(self, seqs: torch.Tensor, kv_caches: List[KVCache] = None, valid_lengths: List[int] = None):
 		"""
 		seqs: (Batch, Seq_Len, D_Model)
 		kv_caches: List of KVCache objects (one per layer)
@@ -358,7 +373,7 @@ class Model(nn.Module):
 
 		self.apply(init_weight)
 	
-	def forward(self, toks: torch.Tensor, id_toks: torch.Tensor, kv_caches: list[KVCache] = None, valid_lengths: list[int] = None):
+	def forward(self, toks: torch.Tensor, id_toks: torch.Tensor, kv_caches: List[KVCache] = None, valid_lengths: List[int] = None):
 		seqs = self.tok_emb(toks) + self.player_emb(id_toks)
 		seqs = self.transformer(seqs, kv_caches, valid_lengths)
 		logits = self.policy_fn(seqs)
@@ -371,10 +386,10 @@ class Model(nn.Module):
 		toks: torch.Tensor,
 		id_toks: torch.Tensor,
 		action_mask: torch.Tensor,
-		kv_caches: list[KVCache] = None,
-		valid_lengths: list[int] = None,
+		kv_caches: List[KVCache] = None,
+		valid_lengths: List[int] = None,
 		deterministic = False
-	) -> dict[str, torch.Tensor]:
+	) -> Dict[str, torch.Tensor]:
 		"""
 		toks: (Batch, Seq_Len) - new tokens appended at last
 		id_toks: (Batch, Seq_Len) - player id of each token
@@ -385,7 +400,7 @@ class Model(nn.Module):
 		# logits: (Batch, Seq_Len, N_Actions) -> (Batch, N_Action)
 		# values: (Batch, Seq_Len) -> (Batch,)
 		logits = torch.stack([logits[i, length - 1] for i, length in enumerate(valid_lengths)])
-		logits = torch.where(action_mask, logits, -torch.inf)
+		logits.masked_fill_(action_mask.logical_not(), -torch.inf)
 		logits -= logits.logsumexp(dim=-1, keepdim=True)
 		values = torch.stack([values[i, length - 1] for i, length in enumerate(valid_lengths)])
 		if deterministic:
@@ -401,39 +416,3 @@ class Model(nn.Module):
 			'log_probs': log_probs,
 			'values': values,
 		}
-
-# -----------------------------------------------------------------------------
-# Verification of Correctness
-# -----------------------------------------------------------------------------
-from timer import CumulativeTimer
-
-if __name__ == '__main__':
-	timer = CumulativeTimer()
-
-	# Setup
-	BATCH, HEADS, DIM, DTYPE, DEV = 64, 4, 256, torch.float32, 'cuda' # Use float32 for clear verification
-	model = Transformer(DIM, 1024, num_blocks=8, num_heads=HEADS).to(DEV)
-
-	buffer = TensorBuffer(2 * BATCH * 8, model.cache_shape, dtype=DTYPE, device=DEV)
-	caches = [model.create_kv_cache(buffer) for _ in range(BATCH)]
-	cache = collate_kv_cache(caches)
-
-	seq = torch.empty((BATCH, 1024, DIM), device=DEV)
-	out = torch.empty((BATCH, 1024, DIM), device=DEV)
-
-	with timer, torch.inference_mode():
-		for _ in range(100):
-			valid_lengths = torch.randint(1, 5, size=(BATCH,)).tolist()
-			x = torch.rand((BATCH, 4, DIM), device=DEV, dtype=DTYPE)
-			y = model(x, cache, valid_lengths)
-			for j, (c, l) in enumerate(zip(cache[0].caches, valid_lengths)):
-				seq[j, c.curr_pos - l : c.curr_pos] = x[j, :l]
-				out[j, c.curr_pos - l : c.curr_pos] = y[j, :l]
-
-		out2: torch.Tensor = model(seq)
-
-	print(timer.get_total_time())
-
-	for i, l in enumerate(c.curr_pos for c in cache[0].caches):
-		err = (out[i, :l] - out2[i, :l]).abs().max()
-		print(cache[0].caches[i].curr_pos, err)

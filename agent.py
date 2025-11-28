@@ -3,6 +3,7 @@ from tractor import DealState, CoverState, PlayState
 from enum import Enum
 from itertools import count
 import numpy as np
+from typing import List
 
 class Stage(Enum):
 	DEAL = 0
@@ -35,7 +36,7 @@ class Agent:
 		self.banker = -1
 
 		# cards currently held
-		self.hand: list[int] = []
+		self.hand: List[int] = []
 
 		# current stage
 		self.deal = None

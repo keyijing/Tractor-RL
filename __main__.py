@@ -1,9 +1,11 @@
+import sys, os
+sys.path.append('/data/Tractor')
+
 from agent import N_TOKENS, N_ACTIONS, Stage, Agent
 from model import Model
 import numpy as np
 import torch
 import json
-import os
 
 _online = os.environ.get("USER", "") == "root"
 if _online:
@@ -24,22 +26,25 @@ model = Model(
 	num_heads=8,
 )
 data_dir = '/data/Tractor/model.pt'
-model.load_state_dict(torch.load(data_dir))
+model.load_state_dict(torch.load(data_dir, map_location=device))
 model.to(device)
 
 player = Agent()
 his_toks = []
-res_toks: list[int] = full_input.get('data', [])
+res_toks: list = full_input.get('data', [])
 cur_toks = res_toks
 
 def policy(toks: list, action_mask: np.ndarray):
+	global res_toks
+	global cur_toks
+
 	if cur_toks:
 		tok = cur_toks[0]
 		cur_toks = cur_toks[1:]
 		return tok
 
-	toks_tensor = torch.Tensor(toks, device=device).unsqueeze(dim=0)
-	action_mask_tensor = torch.Tensor(action_mask, device=device).unsqueeze(dim=0)
+	toks_tensor = torch.tensor(toks, dtype=torch.int64, device=device).unsqueeze(dim=0)
+	action_mask_tensor = torch.from_numpy(action_mask).to(device).unsqueeze(dim=0)
 	output = model.get_action_and_value(
 		toks=toks_tensor[..., 0],
 		id_toks=toks_tensor[..., 1],
@@ -67,6 +72,8 @@ for req in full_input['requests']:
 			his_toks += toks
 			tok = policy(his_toks, mask)
 			ids += player.tok_to_ids(tok)
+		for id in ids:
+			player.hand.remove(id)
 
 	elif player.stage == Stage.PLAY:
 		ids = []
