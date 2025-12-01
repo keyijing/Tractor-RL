@@ -877,3 +877,19 @@ class Tractor():
 		else:
 			self.score += points
 		self.reward[player] -= points
+
+	@property
+	def final_scores(self):
+		if self.score <= 0: # 大光，庄家得3分
+			scores = [3, -3]
+		elif self.score < 40: # 小光，庄家得2分
+			scores = [2, -2]
+		elif self.score < 80: # 庄家得1分
+			scores = [1, -1]
+		elif self.score < 120: # 闲家得1分
+			scores = [-1, 1]
+		elif self.score < 160: # 闲家得2分
+			scores = [-2, 2]
+		else:
+			scores = [-3, 3]
+		return [scores[(i - self.banker_pos) % 2] for i in range(4)]
