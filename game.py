@@ -252,7 +252,7 @@ class Tractor():
 
 	def _reveal(self, currplayer, winner): # 扣底
 		if self._checkPokerType(self.history[0]) != "suspect":
-			mult = len(self.history[0])
+			mult = 2*len(self.history[0])
 		else:
 			divided, _ = self._checkThrow(self.history[0], (currplayer-3)%4, check=False)
 			divided.sort(key=lambda x: len(x), reverse=True)
