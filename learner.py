@@ -157,12 +157,12 @@ class RLLearner:
 
 		# push new model
 		if self.master:
-			self.model_pools['best'].push(self.model.state_dict())
+			self.model_pools['best'].push(self.raw_model.state_dict())
 			self.iterations += 1
 			if self.iterations % self.config['ckpt_save_interval'] == 0:
-				self.model_pools['ckpt'].push(self.model.state_dict())
+				self.model_pools['ckpt'].push(self.raw_model.state_dict())
 				path = Path(self.config['ckpt_save_path'], f'{self.iterations}.pt')
-				torch.save(self.model.state_dict(), path)
+				torch.save(self.raw_model.state_dict(), path)
 
 		for key, value in stats:
 			if key == 'reward':
@@ -182,7 +182,8 @@ class Learner(Process):
 		self.config = config
 
 	def run(self):
-		if self.config.get('log') == 'wandb':
+		master = self.rank == 0
+		if master and self.config.get('log') == 'wandb':
 			time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
 			wandb.init(project='Tractor-RL', name=f'Learner-{time}', config=self.config)
 
@@ -193,7 +194,6 @@ class Learner(Process):
 			world_size=self.world_size,
 			rank=self.rank,
 		)
-		master = self.rank == 0
 
 		model = Model(**self.config['model'])
 		self.rl_learner = RLLearner(model, self.device_id, self.replay_buffer, self.config['rl'])
@@ -211,5 +211,5 @@ class Learner(Process):
 		except Exception as e:
 			print(e)
 		finally:
-			if self.config.get('log') == 'wandb':
+			if master and self.config.get('log') == 'wandb':
 				wandb.finish()
