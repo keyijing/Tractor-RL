@@ -3,7 +3,7 @@ from agent import N_TOKENS, N_ACTIONS
 from env import Env
 from replay_buffer import ReplayBuffer
 from model_pool import ModelPoolClient
-from timer import CumulativeTimer
+import random
 import numpy as np
 import torch
 from collections import defaultdict
@@ -71,7 +71,7 @@ class Trajectory:
 		pos = self.kv_cache[0].curr_pos - 1
 		if pos >= 0:
 			assert self.output_mask[pos] == True
-			self.rewards[pos] = last_reward / 10
+			self.rewards[pos] = last_reward
 
 	def append(self, seq_len: int, toks: list, action: int, log_prob: float, logits: np.ndarray, value: float):
 		"""
@@ -141,8 +141,6 @@ def episode_loop(
 	models: Dict of Model objects (must share same architecture/hyperparams).
 	model_ids: List of length 4. Maps player_id -> model_index.
 	"""
-	timer = [CumulativeTimer() for _ in range(6)]
-
 	gamma = config['gamma']
 	lam = config['lambda']
 	batch_size = len(traj_all)
@@ -171,26 +169,25 @@ def episode_loop(
 
 		# --- A. Gather Observations (Bucket by Model) ---
 		# Iterate all environments. If done, skip.
-		with timer[0]:
-			for env_trajs, env in zip(traj_all, envs):
-				if env.done:
-					continue
-				obs = env.obs()
-				pid: int = obs['player']
-				mid = model_ids[pid] # Get model index for this player
+		for env_trajs, env in zip(traj_all, envs):
+			if env.done:
+				continue
+			obs = env.obs()
+			pid: int = obs['player']
+			mid = model_ids[pid] # Get model index for this player
 
-				traj = env_trajs[pid]
+			traj = env_trajs[pid]
 
-				# Store reward from previous action
-				traj.set_reward(obs['reward'])
+			# Store reward from previous action
+			traj.set_reward(obs['reward'] / 100)
 
-				# Add to specific model bucket
-				group = batches[mid]
-				group['toks'].append(obs['toks'])
-				group['masks'].append(obs['action_mask'])
-				group['lens'].append(len(obs['toks']))
-				group['envs'].append(env)
-				group['trajs'].append(traj)
+			# Add to specific model bucket
+			group = batches[mid]
+			group['toks'].append(obs['toks'])
+			group['masks'].append(obs['action_mask'])
+			group['lens'].append(len(obs['toks']))
+			group['envs'].append(env)
+			group['trajs'].append(traj)
 
 		# --- B. Process Each Model Group ---
 		for mid, group in batches.items():
@@ -203,88 +200,85 @@ def episode_loop(
 			# --- I. Prepare Tensors ---
 			# Pad sequences (Ragged Batching)
 			# toks_tensor: (Current_Batch, Max_Len_In_Batch, 2)
-			with timer[1]:
-				toks_tensor = torch.nn.utils.rnn.pad_sequence(
-					[torch.tensor(tok, dtype=torch.int64) for tok in toks],
-					batch_first=True
-				).to(device)
+			toks_tensor = torch.nn.utils.rnn.pad_sequence(
+				[torch.tensor(tok, dtype=torch.int64) for tok in toks],
+				batch_first=True
+			).to(device)
 
-				action_mask_tensor = torch.from_numpy(np.stack(action_masks)).to(device)
+			action_mask_tensor = torch.from_numpy(np.stack(action_masks)).to(device)
 
-				# Collate KV cache for this specific subset of players
-				kv_cache = collate_kv_cache([traj.kv_cache for traj in trajs])
+			# Collate KV cache for this specific subset of players
+			kv_cache = collate_kv_cache([traj.kv_cache for traj in trajs])
 
 			# --- II. Inference (Using the specific model weights) ---
 			# toks_tensor[..., 0] is Token ID, [..., 1] is Player ID
-			with timer[2]:
-				ret = models[mid].get_action_and_value(
-					toks_tensor[..., 0],
-					toks_tensor[..., 1],
-					action_mask_tensor,
-					kv_cache,
-					valid_lengths
-				)
+			ret = models[mid].get_action_and_value(
+				toks_tensor[..., 0],
+				toks_tensor[..., 1],
+				action_mask_tensor,
+				kv_cache,
+				valid_lengths
+			)
 
-				# --- III. Move to CPU ---
-				actions = ret['actions'].tolist()
-				log_probs = ret['log_probs'].tolist()
-				values = ret['values'].tolist()
-				# Copy logits carefully; if large vocab, this is slow.
-				# Since this is RL, N_ACTIONS usually small.
-				logits = ret['logits'].cpu().numpy()
+			# --- III. Move to CPU ---
+			actions = ret['actions'].tolist()
+			log_probs = ret['log_probs'].tolist()
+			values = ret['values'].tolist()
+			# Copy logits carefully; if large vocab, this is slow.
+			# Since this is RL, N_ACTIONS usually small.
+			logits = ret['logits'].cpu().numpy()
 
 			# --- VI. Step Environment & Store ---
-			with timer[3]:
-				for env, traj, seq_len, tok, action, logit, log_prob, value in zip(
-					curr_envs, trajs, valid_lengths, toks, actions, logits, log_probs, values
-				):
-					done = env.step(action)
-					if done:
-						done_cnt += 1
+			for env, traj, seq_len, tok, action, logit, log_prob, value in zip(
+				curr_envs, trajs, valid_lengths, toks, actions, logits, log_probs, values
+			):
+				done = env.step(action)
+				if done:
+					done_cnt += 1
 
-					# Store trajectory data
-					traj.append(seq_len, tok, action, log_prob, logit, value)
+				# Store trajectory data
+				traj.append(seq_len, tok, action, log_prob, logit, value)
 
 	# Final Rewards
 	# Since the loop breaks when env.step returns Done, the last reward 
 	# hasn't been observed via env.obs().
 	for env, trajs in zip(envs, traj_all):
-		for reward, traj in zip(env.rewards, trajs):
-			traj.set_reward(reward)
+		for reward, final_score, traj in zip(env.rewards, env.game.final_scores, trajs):
+			traj.set_reward(reward / 100 + final_score)
 
 	# GAE Calculation
 	for np_buffer in np_buffers.values():
 		compute_gae(np_buffer, gamma, lam)
 
 class Actor(Process):
-	def __init__(self, rank: int, datasets: dict[str, ReplayBuffer], config: dict):
+	def __init__(self, rank: int, selected_gpus: list[int], dataset: ReplayBuffer, config: dict):
 		super(Actor, self).__init__()
 		self.rank = rank
-		self.datasets = datasets
+		self.device_id = selected_gpus[rank]
+		self.dataset = dataset
 		self.config = config
 		self.batch_size: int = config['actor']['batch_size']
 		self.seed = config['actor'].get('seed')
+		self.rng = random.Random(self.seed)
 		self.daemon = True
 
 	def run(self):
 		print('actor run')
-		device = f'cuda:{self.rank}'
+		device = f'cuda:{self.device_id}'
 
-		model_names = self.datasets.keys()
-
-		datasets = self.datasets
+		dataset = self.dataset
 		print('creating model pool client')
 		model_pools = {
 			name: ModelPoolClient(name)
-			for name in model_names
+			for name in ['best', 'ckpt']
 		}
 		print('client create done')
 		models = {
 			name: Model(**self.config['model']).to(device)
-			for name in model_names
+			for name in ['best', 'ckpt']
 		}
 		versions = {}
-		for name in model_names:
+		for name in ['best', 'ckpt']:
 			versions[name] = model_pools[name].get_latest_model()
 			state_dict = model_pools[name].load_model(versions[name])
 			models[name].load_state_dict(state_dict)
@@ -313,11 +307,11 @@ class Actor(Process):
 			np_buffers['toks'] = NumpyBuffer(capacity, (ref_model.max_seq_len, 2), dtype=np.int64)
 			np_buffers['logits'] = NumpyBuffer(capacity, (ref_model.max_seq_len, ref_model.n_actions), dtype=np.float32)
 			return np_buffers
-		np_buffers = {name: _create_np_buffer(self.batch_size * 2) for name in model_names}
+		np_buffers = {name: _create_np_buffer(self.batch_size * 2) for name in ['best', 'ckpt']}
 
 		# 3. Create Trajectories
 		# traj_all[env_index][player_index]
-		player_model = ['best', 'avg', 'best', 'avg']
+		player_model = ['best', 'ckpt', 'best', 'ckpt']
 		traj_all = [[Trajectory(ref_model, tensor_buffer, np_buffers[player_model[i]]) for i in range(4)] for _ in range(self.batch_size)]
 		envs = [Env(None if self.seed is None else self.seed + self.rank * self.batch_size + i) for i in range(self.batch_size)]
 
@@ -325,10 +319,7 @@ class Actor(Process):
 		episode = 0
 		while True:
 
-			timer = CumulativeTimer()
-			with timer:
-				episode_loop(models, player_model, traj_all, envs, np_buffers, device, self.config)
-			# print(timer.get_total_time())
+			episode_loop(models, player_model, traj_all, envs, np_buffers, device, self.config)
 
 			# Add the trajectories to dataset
 			def _push(np_buffer: dict[str, NumpyBuffer], dataset: ReplayBuffer):
@@ -336,19 +327,22 @@ class Actor(Process):
 					k: np_buffer[k][:].copy()
 					for k in ['toks', 'actions', 'output_mask', 'log_probs', 'logits', 'values', 'advantages', 'rewards']
 				})
-			_push(np_buffers['best'], datasets['best'])
-			_push(np_buffers['best'], datasets['avg'])
-			_push(np_buffers['avg'], datasets['avg'])
+			_push(np_buffers['best'], dataset)
 
 			# Update model
 			episode += 1
-			for name in model_names:
-				model_pool = model_pools[name]
-				latest = model_pool.get_latest_model()
-				if latest['id'] > versions[name]['id']:
-					state_dict = model_pool.load_model(latest)
-					versions[name] = latest
-					models[name].load_state_dict(state_dict)
+			latest = model_pools['best'].get_latest_model()
+			if latest['id'] > versions['best']['id']:
+				state_dict = model_pools['best'].load_model(latest)
+				versions['best'] = latest
+				models['best'].load_state_dict(state_dict)
+			if self.rng.random() < 0.8:
+				models['ckpt'].load_state_dict(models['best'].state_dict())
+			else:
+				version = self.rng.choice(model_pools['ckpt'].get_model_list())
+				state_dict = model_pools['ckpt'].load_model(version)
+				versions['ckpt'] = version
+				models['ckpt'].load_state_dict(state_dict)
 
 			# print(f'episode {episode} done')
 

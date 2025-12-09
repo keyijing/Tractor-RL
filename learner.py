@@ -4,12 +4,12 @@ from model import Model
 from multiprocessing import Process
 from pathlib import Path
 import wandb
-import threading
-from concurrent.futures import ThreadPoolExecutor
-import time
+from collections import defaultdict
 from datetime import datetime
 import numpy as np
 import torch
+from torch import distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import TensorDataset, DataLoader
@@ -44,81 +44,24 @@ def masked_normalize(advantages: torch.Tensor, output_mask: torch.Tensor, eps = 
 	std = advantages[output_mask].std() + eps
 	return (advantages - mean) / std
 
-class SLLearner:
-	def __init__(self, name: str, models: dict[str, Model], replay_buffers: dict[str, ReplayBuffer], config: dict):
-		self.name = name
-		self.config = config
-		self.device = config['device']
-		self.model = models[name].to(self.device)
-		self.replay_buffer = replay_buffers[name]
-		self.model_pool = ModelPoolServer(config['model_pool_size'], name)
-		self.model_pool.push(self.model.state_dict())
-		self.optimizer = torch.optim.AdamW(self.model.parameters(), **config['optim'])
-		self.iterations = 0
-
-	def step(self):
-		batch_size = self.config['batch_size']
-		mini_batch_size = self.config['mini_batch_size']
-
-		# sample batch
-		batch = self.replay_buffer.sample(batch_size)
-		toks = torch.tensor(batch['toks'], device=self.device)
-		output_masks = torch.tensor(batch['output_mask'], device=self.device)
-		logits = torch.tensor(batch['logits'], device=self.device)
-		# print(f'{toks.shape=}')
-		# print(f'{output_masks.shape=}')
-		# print(f'{logits.shape=}')
-
-		print(f'SL Iteration {self.iterations}, replay buffer in {self.replay_buffer.stats["sample_in"]} out {self.replay_buffer.stats["sample_out"]}')
-		self.model.train(True) # Training mode
-
-		dataset = TensorDataset(toks, output_masks, logits)
-		dataloader = DataLoader(dataset, batch_size=mini_batch_size, shuffle=True)
-
-		stats = {
-			'loss': []
-		}
-
-		for _ in range(self.config['epochs']):
-			for tok, output_mask, old_logit in dataloader:
-				total = output_mask.sum()
-				def _masked_mean(x: torch.Tensor):
-					return torch.where(output_mask, x, 0).sum() / total
-
-				action_mask = old_logit != -torch.inf
-				target = F.softmax(old_logit, dim=-1)
-				logit, _ = self.model(tok[..., 0], tok[..., 1])
-				logit = torch.where(action_mask, logit, -torch.inf)
-				loss = _masked_mean(cross_entropy(logit, target))
-
-				stats['loss'].append(loss.item())
-
-				self.optimizer.zero_grad()
-				loss.backward()
-				if 'clip_grad' in self.config:
-					clip_grad_norm_(self.model.parameters(), max_norm=self.config['clip_grad'])
-				self.optimizer.step()
-
-		# push new model
-		self.model_pool.push(self.model.state_dict())
-		self.iterations += 1
-		if self.iterations % self.config['ckpt_save_interval'] == 0:
-			path = Path(self.config['ckpt_save_path'], f'{self.iterations}.pt')
-			torch.save(self.model.state_dict(), path)
-
-		return {
-			key: sum(value) / len(value) for key, value in stats.items()
-		}
-
 class RLLearner:
-	def __init__(self, name: str, models: dict[str, Model], replay_buffers: dict[str, ReplayBuffer], config: dict):
-		self.name = name
+	def __init__(self, model: Model, device_id: int, replay_buffer: ReplayBuffer, config: dict):
 		self.config = config
-		self.device = config['device']
-		self.model = models[name].to(self.device)
-		self.replay_buffer = replay_buffers[name]
-		self.model_pool = ModelPoolServer(config['model_pool_size'], name)
-		self.model_pool.push(self.model.state_dict())
+		self.master = dist.get_rank() == 0
+		self.world_size = dist.get_world_size()
+		self.device = f'cuda:{device_id}'
+		self.raw_model = model.to(self.device)
+		self.model = DDP(self.raw_model, device_ids=[device_id])
+		self.replay_buffer = replay_buffer
+
+		if self.master:
+			self.model_pools = {
+				'best': ModelPoolServer(config['model_pool']['best']['size'], 'best'),
+				'ckpt': ModelPoolServer(config['model_pool']['ckpt']['size'], 'ckpt'),
+			}
+			self.model_pools['best'].push(self.model.state_dict())
+			self.model_pools['ckpt'].push(self.model.state_dict())
+
 		self.optimizer = torch.optim.AdamW(self.model.parameters(), **config['optim'])
 		self.iterations = 0
 
@@ -126,43 +69,56 @@ class RLLearner:
 		eps = self.config['eps']
 		value_coef = self.config['value_coef']
 		entropy_coef = self.config['entropy_coef']
+		aux_coef = self.config['aux_coef']
 		batch_size = self.config['batch_size']
 		mini_batch_size = self.config['mini_batch_size']
 
 		# sample batch
-		batch = self.replay_buffer.pop(batch_size)
-		toks = torch.tensor(batch['toks'], device=self.device)
-		actions = torch.tensor(batch['actions'], device=self.device)
-		output_masks = torch.tensor(batch['output_mask'], device=self.device)
-		log_probs = torch.tensor(batch['log_probs'], device=self.device)
-		# Assume logits are actually log_probs (log_softmax output)
-		logits = torch.tensor(batch['logits'], device=self.device)
-		targets = torch.tensor(batch['values'], device=self.device)
-		advantages = torch.tensor(batch['advantages'], device=self.device)
-		advantages = masked_normalize(advantages, output_masks)
-		reward = np.mean(np.where(batch['output_mask'], batch['rewards'], 0).sum(axis=-1)).item()
-		# print(f'{toks.shape=}')
-		# print(f'{actions.shape=}')
-		# print(f'{output_masks.shape=}')
-		# print(f'{log_probs.shape=}')
-		# print(f'{logits.shape=}')
-		# print(f'{targets.shape=}')
-		# print(f'{advantages.shape=}')
+		local_batch_size = batch_size // self.world_size
+		if self.master:
+			batch = self.replay_buffer.pop(batch_size)
+			reward = np.mean(np.where(batch['output_mask'], batch['rewards'], 0).sum(axis=-1)).item()
+			del batch['rewards']
+			for key in batch:
+				batch[key] = torch.tensor(batch[key], device=self.device)
+			batch['advantages'] = masked_normalize(batch['advantages'], batch['output_mask'])
+			for key in batch:
+				batch[key] = batch[key].chunk(self.world_size)
+		else:
+			batch = defaultdict(lambda: None)
 
-		print(f'RL Iteration {self.iterations}, replay buffer in {self.replay_buffer.stats["sample_in"]} out {self.replay_buffer.stats["sample_out"]}')
+		max_seq_len = self.raw_model.max_seq_len
+		n_actions = self.raw_model.n_actions
+
+		toks = torch.empty((local_batch_size, max_seq_len), dtype=torch.int64, device=self.device)
+		actions = torch.empty((local_batch_size, max_seq_len), dtype=torch.int64, device=self.device)
+		output_masks = torch.empty((local_batch_size, max_seq_len), dtype=bool, device=self.device)
+		log_probs = torch.empty((local_batch_size, max_seq_len), dtype=torch.float32, device=self.device)
+		# Assume logits are actually log_probs (log_softmax output)
+		logits = torch.empty((local_batch_size, max_seq_len, n_actions), dtype=torch.float32, device=self.device)
+		targets = torch.empty((local_batch_size, max_seq_len), dtype=torch.float32, device=self.device)
+		advantages = torch.empty((local_batch_size, max_seq_len), dtype=torch.float32, device=self.device)
+
+		dist.scatter(toks, batch['toks'])
+		dist.scatter(actions, batch['actions'])
+		dist.scatter(output_masks, batch['output_mask'])
+		dist.scatter(log_probs, batch['log_probs'])
+		dist.scatter(logits, batch['logits'])
+		dist.scatter(targets, batch['values'])
+		dist.scatter(advantages, batch['advantages'])
+
+		if self.master:
+			print(f'RL Iteration {self.iterations}, replay buffer in {self.replay_buffer.stats["sample_in"]} out {self.replay_buffer.stats["sample_out"]}')
 		self.model.train(True) # Training mode
 
 		dataset = TensorDataset(toks, actions, output_masks, log_probs, logits, targets, advantages)
 		dataloader = DataLoader(dataset, batch_size=mini_batch_size, shuffle=True)
 
-		stats = {
-			'reward': [reward],
-			'policy_loss': [],
-			'value_loss': [],
-			'entropy_loss': [],
-			'total_loss': [],
-			'kl_div': [],
-		}
+		stats = defaultdict(list)
+		if self.master:
+			stats['reward'] = reward
+		else:
+			stats['reward'] = 0
 
 		for _ in range(self.config['epochs']):
 			for tok, action, output_mask, old_log_prob, old_logit, target, adv in dataloader:
@@ -171,22 +127,25 @@ class RLLearner:
 					return torch.where(output_mask, x, 0).sum() / total
 
 				action_mask = old_logit != -torch.inf
-				logit, value = self.model(tok[..., 0], tok[..., 1])
+				logit, value, mask_pred= self.model(tok[..., 0], tok[..., 1])
 				logit = torch.where(action_mask, logit, -torch.inf)
 				logit = F.log_softmax(logit, dim=-1)
 				log_prob = logit.gather(-1, action.unsqueeze(dim=-1)).squeeze(dim=-1)
 				ratio = torch.exp(log_prob - old_log_prob)
 				surr1 = ratio * adv
 				surr2 = torch.clip(ratio, 1 - eps, 1 + eps) * adv
+
 				policy_loss = -_masked_mean(torch.min(surr1, surr2))
 				value_loss = _masked_mean(F.mse_loss(value, target, reduction='none'))
 				entropy_loss = -_masked_mean(entropy(logit))
+				aux_loss = _masked_mean(F.binary_cross_entropy_with_logits(mask_pred, action_mask.to(dtype=torch.float32), reduce='none').mean(dim=-1))
 				KL_div = _masked_mean(KL_divergence(logit, old_logit))
-				loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss
+				loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss + aux_coef * aux_loss
 
 				stats['policy_loss'].append(policy_loss.item())
 				stats['value_loss'].append(value_loss.item())
 				stats['entropy_loss'].append(entropy_loss.item())
+				stats['aux_loss'].append(aux_loss.item())
 				stats['total_loss'].append(loss.item())
 				stats['kl_div'].append(KL_div.item())
 
@@ -197,58 +156,58 @@ class RLLearner:
 				self.optimizer.step()
 
 		# push new model
-		self.model_pool.push(self.model.state_dict())
-		self.iterations += 1
-		if self.iterations % self.config['ckpt_save_interval'] == 0:
-			path = Path(self.config['ckpt_save_path'], f'{self.iterations}.pt')
-			torch.save(self.model.state_dict(), path)
+		if self.master:
+			self.model_pools['best'].push(self.model.state_dict())
+			self.iterations += 1
+			if self.iterations % self.config['ckpt_save_interval'] == 0:
+				self.model_pools['ckpt'].push(self.model.state_dict())
+				path = Path(self.config['ckpt_save_path'], f'{self.iterations}.pt')
+				torch.save(self.model.state_dict(), path)
 
-		return {
-			key: sum(value) / len(value) for key, value in stats.items()
-		}
+		for key, value in stats:
+			if key == 'reward':
+				continue
+			value = torch.tensor(sum(value) / len(value), dtype=torch.float32, device=self.device)
+			dist.reduce(value, dst=0, op=dist.ReduceOp.AVG)
+			stats[key] = value.item()
+		return stats
 
 class Learner(Process):
-	def __init__(self, replay_buffers: dict[str, ReplayBuffer], config: dict):
+	def __init__(self, rank: int, selected_gpus: list[int], replay_buffer: ReplayBuffer, config: dict):
 		super(Learner, self).__init__()
-		self.replay_buffers = replay_buffers
+		self.rank = rank
+		self.world_size = len(selected_gpus)
+		self.device_id = selected_gpus[rank]
+		self.replay_buffer = replay_buffer
 		self.config = config
-
-	def _flush(self):
-		while True:
-			self.sl_learner.replay_buffer._flush()
-			self.rl_learner.replay_buffer._flush()
-			time.sleep(0.1)
 
 	def run(self):
 		if self.config.get('log') == 'wandb':
 			time = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
 			wandb.init(project='Tractor-RL', name=f'Learner-{time}', config=self.config)
 
-		models = {
-			name: Model(**self.config['model'])
-			for name in self.replay_buffers
-		}
-		self.sl_learner = SLLearner('avg', models, self.replay_buffers, self.config['sl'])
-		self.rl_learner = RLLearner('best', models, self.replay_buffers, self.config['rl'])
+		torch.cuda.set_device(self.device_id)
+		dist.init_process_group(
+			backend='nccl',
+			init_method='tcp://127.0.0.1:29500',
+			world_size=self.world_size,
+			rank=self.rank,
+		)
+		master = self.rank == 0
 
-		thread = threading.Thread(target=self._flush, daemon=True)
-		thread.start()
+		model = Model(**self.config['model'])
+		self.rl_learner = RLLearner(model, self.device_id, self.replay_buffer, self.config['rl'])
+
 		try:
 			while True:
-				with ThreadPoolExecutor(max_workers=2) as exec:
-					sl = exec.submit(self.sl_learner.step)
-					rl = exec.submit(self.rl_learner.step)
-					sl_stats = sl.result()
-					rl_stats = rl.result()
-
-				if self.config.get('log') == 'wandb':
-					wandb.log({
-						**{f'rl/{key}': value for key, value in rl_stats.items()},
-						**{f'sl/{key}': value for key, value in sl_stats.items()},
-					})
-				else:
-					print(f'{rl_stats = }')
-					print(f'{sl_stats = }')
+				rl_stats = self.rl_learner.step()
+				if master:
+					if self.config.get('log') == 'wandb':
+						wandb.log({
+							**{f'rl/{key}': value for key, value in rl_stats.items()}
+						})
+					else:
+						print(f'{rl_stats = }')
 		except Exception as e:
 			print(e)
 		finally:

@@ -9,41 +9,30 @@ config = {
 	'gamma': 0.98,
 	'lambda': 0.95,
 	'log': 'wandb',
-	'sl': {
-		'device': 'cuda:0',
-		'model_pool_size': 4,
-		'batch_size': 1024,
-		'mini_batch_size': 64,
-		'epochs': 1,
-		'clip_grad': 1,
-		'ckpt_save_interval': 50,
-		'ckpt_save_path': 'checkpoint/model_avg',
-		'replay_buffer': {
-			'capacity': 16384,
-			'episode': 64,
-			'seed': 0,
-		},
-		'optim': {
-			'lr': 1e-5,
-			'weight_decay': 1e-2,
-		},
-	},
 	'rl': {
-		'device': 'cuda:7',
-		'model_pool_size': 4,
 		'eps': 0.2,
 		'value_coef': 0.5,
-		'entropy_coef': 0.005,
-		'batch_size': 1024,
+		'entropy_coef': 1e-3,
+		'aux_coef': 0.1,
+		'batch_size': 2048,
 		'mini_batch_size': 64,
 		'epochs': 3,
 		'clip_grad': 1,
-		'ckpt_save_interval': 50,
-		'ckpt_save_path': 'checkpoint/model_best',
+		'ckpt_save_interval': 100,
+		'ckpt_save_path': 'checkpoint',
+		'n_learners': 2,
 		'replay_buffer': {
 			'capacity': 1536,
 			'episode': 64,
 			'seed': 0,
+		},
+		'model_pool': {
+			'best': {
+				'size': 2,
+			},
+			'ckpt': {
+				'size': 16,
+			},
 		},
 		'optim': {
 			'lr': 1e-5,
@@ -70,19 +59,17 @@ config = {
 if __name__ == '__main__':
 
 	mp.set_start_method('spawn')
-	os.makedirs(config['sl']['ckpt_save_path'], exist_ok=True)
 	os.makedirs(config['rl']['ckpt_save_path'], exist_ok=True)
 
-	datasets = {
-		'avg': ReplayBuffer(**config['sl']['replay_buffer']),
-		'best': ReplayBuffer(**config['rl']['replay_buffer']),
-	}
-	learner = Learner(datasets, config)
-	actors = [Actor(i + 2, datasets, config) for i in range(config['actor']['n_actors'])]
+	dataset = ReplayBuffer(**config['rl']['replay_buffer'])
+	learners = [Learner(i, [6, 7], dataset, config) for i in range(config['rl']['n_learners'])]
+	actors = [Actor(i, [2, 3, 4, 5], dataset, config) for i in range(config['actor']['n_actors'])]
 
-	learner.start()
+	for learner in learners:
+		learner.start()
 	for actor in actors:
 		actor.start()
-	learner.join()
+	for learner in learners:
+		learner.join()
 	for actor in actors:
 		actor.join()

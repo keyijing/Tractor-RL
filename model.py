@@ -369,6 +369,8 @@ class Model(nn.Module):
 		self.player_emb = nn.Embedding(n_players + 1, d_model, padding_idx=0)
 		self.policy_fn = nn.Linear(d_model, n_actions)
 		self.value_fn = nn.Linear(d_model, 1)
+		self.mask_pred = nn.Linear(d_model, n_actions)
+		self.reward_pred = nn.Linear(d_model, n_actions * 3)
 		self.transformer = Transformer(d_model, max_seq_len, **conf)
 
 		self.apply(init_weight)
@@ -378,7 +380,11 @@ class Model(nn.Module):
 		seqs = self.transformer(seqs, kv_caches, valid_lengths)
 		logits = self.policy_fn(seqs)
 		values = self.value_fn(seqs).squeeze(-1)
-		return logits, values
+		if self.training:
+			mask_pred = self.mask_pred(seqs)
+		else:
+			mask_pred = None
+		return logits, values, mask_pred
 	
 	@torch.inference_mode()
 	def get_action_and_value(
@@ -395,7 +401,7 @@ class Model(nn.Module):
 		id_toks: (Batch, Seq_Len) - player id of each token
 		action_mask: (Batch, N_Actions) - valid actions
 		"""
-		logits, values = self(toks, id_toks, kv_caches, valid_lengths)
+		logits, values, _, = self(toks, id_toks, kv_caches, valid_lengths)
 		# Get the logits and values of the last valid position
 		# logits: (Batch, Seq_Len, N_Actions) -> (Batch, N_Action)
 		# values: (Batch, Seq_Len) -> (Batch,)
