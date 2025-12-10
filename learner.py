@@ -4,6 +4,7 @@ from model import Model
 from multiprocessing import Process
 from pathlib import Path
 import wandb
+import traceback
 from collections import defaultdict
 from datetime import datetime
 import numpy as np
@@ -50,17 +51,18 @@ class RLLearner:
 		self.master = dist.get_rank() == 0
 		self.world_size = dist.get_world_size()
 		self.device = f'cuda:{device_id}'
-		self.raw_model = model.to(self.device)
-		self.model = DDP(self.raw_model, device_ids=[device_id])
+		self.model = DDP(model.to(self.device), device_ids=[device_id])
 		self.replay_buffer = replay_buffer
 
 		if self.master:
+			print('creating model pool server')
 			self.model_pools = {
 				'best': ModelPoolServer(config['model_pool']['best']['size'], 'best'),
 				'ckpt': ModelPoolServer(config['model_pool']['ckpt']['size'], 'ckpt'),
 			}
-			self.model_pools['best'].push(self.model.state_dict())
-			self.model_pools['ckpt'].push(self.model.state_dict())
+			print('server create done')
+			self.model_pools['best'].push(self.model.module.state_dict())
+			self.model_pools['ckpt'].push(self.model.module.state_dict())
 
 		self.optimizer = torch.optim.AdamW(self.model.parameters(), **config['optim'])
 		self.iterations = 0
@@ -83,14 +85,15 @@ class RLLearner:
 				batch[key] = torch.tensor(batch[key], device=self.device)
 			batch['advantages'] = masked_normalize(batch['advantages'], batch['output_mask'])
 			for key in batch:
-				batch[key] = batch[key].chunk(self.world_size)
+				batch[key] = list(batch[key].chunk(self.world_size))
 		else:
 			batch = defaultdict(lambda: None)
 
-		max_seq_len = self.raw_model.max_seq_len
-		n_actions = self.raw_model.n_actions
+		raw_model = self.model.module
+		max_seq_len = raw_model.max_seq_len
+		n_actions = raw_model.n_actions
 
-		toks = torch.empty((local_batch_size, max_seq_len), dtype=torch.int64, device=self.device)
+		toks = torch.empty((local_batch_size, max_seq_len, 2), dtype=torch.int64, device=self.device)
 		actions = torch.empty((local_batch_size, max_seq_len), dtype=torch.int64, device=self.device)
 		output_masks = torch.empty((local_batch_size, max_seq_len), dtype=bool, device=self.device)
 		log_probs = torch.empty((local_batch_size, max_seq_len), dtype=torch.float32, device=self.device)
@@ -127,7 +130,7 @@ class RLLearner:
 					return torch.where(output_mask, x, 0).sum() / total
 
 				action_mask = old_logit != -torch.inf
-				logit, value, mask_pred= self.model(tok[..., 0], tok[..., 1])
+				logit, value, mask_pred = self.model(tok[..., 0], tok[..., 1])
 				logit = torch.where(action_mask, logit, -torch.inf)
 				logit = F.log_softmax(logit, dim=-1)
 				log_prob = logit.gather(-1, action.unsqueeze(dim=-1)).squeeze(dim=-1)
@@ -135,10 +138,15 @@ class RLLearner:
 				surr1 = ratio * adv
 				surr2 = torch.clip(ratio, 1 - eps, 1 + eps) * adv
 
+				pos_weight = torch.sum(action_mask, dim=-1, keepdim=True)
+				pos_weight = (n_actions - pos_weight) / pos_weight
+
 				policy_loss = -_masked_mean(torch.min(surr1, surr2))
 				value_loss = _masked_mean(F.mse_loss(value, target, reduction='none'))
 				entropy_loss = -_masked_mean(entropy(logit))
-				aux_loss = _masked_mean(F.binary_cross_entropy_with_logits(mask_pred, action_mask.to(dtype=torch.float32), reduce='none').mean(dim=-1))
+				aux_loss = _masked_mean(F.binary_cross_entropy_with_logits(
+					mask_pred, action_mask.to(dtype=torch.float32), reduction='none', pos_weight=pos_weight
+				).mean(dim=-1))
 				KL_div = _masked_mean(KL_divergence(logit, old_logit))
 				loss = policy_loss + value_coef * value_loss + entropy_coef * entropy_loss + aux_coef * aux_loss
 
@@ -157,14 +165,14 @@ class RLLearner:
 
 		# push new model
 		if self.master:
-			self.model_pools['best'].push(self.raw_model.state_dict())
+			self.model_pools['best'].push(self.model.module.state_dict())
 			self.iterations += 1
 			if self.iterations % self.config['ckpt_save_interval'] == 0:
-				self.model_pools['ckpt'].push(self.raw_model.state_dict())
+				self.model_pools['ckpt'].push(self.model.module.state_dict())
 				path = Path(self.config['ckpt_save_path'], f'{self.iterations}.pt')
-				torch.save(self.raw_model.state_dict(), path)
+				torch.save(self.model.module.state_dict(), path)
 
-		for key, value in stats:
+		for key, value in stats.items():
 			if key == 'reward':
 				continue
 			value = torch.tensor(sum(value) / len(value), dtype=torch.float32, device=self.device)
@@ -195,10 +203,10 @@ class Learner(Process):
 			rank=self.rank,
 		)
 
-		model = Model(**self.config['model'])
-		self.rl_learner = RLLearner(model, self.device_id, self.replay_buffer, self.config['rl'])
-
 		try:
+			model = Model(**self.config['model'])
+			self.rl_learner = RLLearner(model, self.device_id, self.replay_buffer, self.config['rl'])
+
 			while True:
 				rl_stats = self.rl_learner.step()
 				if master:
@@ -208,8 +216,9 @@ class Learner(Process):
 						})
 					else:
 						print(f'{rl_stats = }')
-		except Exception as e:
-			print(e)
+		except Exception as _:
+			traceback.print_exc()
 		finally:
+			dist.destroy_process_group()
 			if master and self.config.get('log') == 'wandb':
 				wandb.finish()

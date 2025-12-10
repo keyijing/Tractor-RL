@@ -359,7 +359,7 @@ class Transformer(nn.Module):
 		return seqs
 
 class Model(nn.Module):
-	def __init__(self, n_toks: int, n_players: int, n_actions: int, d_model: int, max_seq_len: int, **conf):
+	def __init__(self, n_toks: int, n_players: int, n_actions: int, d_model: int, max_seq_len: int, pred_mask = True, **conf):
 		super(Model, self).__init__()
 
 		self.n_players = n_players
@@ -369,8 +369,8 @@ class Model(nn.Module):
 		self.player_emb = nn.Embedding(n_players + 1, d_model, padding_idx=0)
 		self.policy_fn = nn.Linear(d_model, n_actions)
 		self.value_fn = nn.Linear(d_model, 1)
-		self.mask_pred = nn.Linear(d_model, n_actions)
-		self.reward_pred = nn.Linear(d_model, n_actions * 3)
+		if pred_mask:
+			self.mask_pred = nn.Linear(d_model, n_actions)
 		self.transformer = Transformer(d_model, max_seq_len, **conf)
 
 		self.apply(init_weight)
@@ -401,7 +401,7 @@ class Model(nn.Module):
 		id_toks: (Batch, Seq_Len) - player id of each token
 		action_mask: (Batch, N_Actions) - valid actions
 		"""
-		logits, values, _, = self(toks, id_toks, kv_caches, valid_lengths)
+		logits, values, _ = self(toks, id_toks, kv_caches, valid_lengths)
 		# Get the logits and values of the last valid position
 		# logits: (Batch, Seq_Len, N_Actions) -> (Batch, N_Action)
 		# values: (Batch, Seq_Len) -> (Batch,)

@@ -6,17 +6,17 @@ import os
 import multiprocessing as mp
 
 config = {
-	'gamma': 0.98,
+	'gamma': 0.99,
 	'lambda': 0.95,
 	'log': 'wandb',
 	'rl': {
 		'eps': 0.2,
 		'value_coef': 0.5,
-		'entropy_coef': 1e-3,
-		'aux_coef': 0.1,
-		'batch_size': 2048,
+		'entropy_coef': 5e-3,
+		'aux_coef': 0.05,
+		'batch_size': 1024,
 		'mini_batch_size': 64,
-		'epochs': 3,
+		'epochs': 2,
 		'clip_grad': 1,
 		'ckpt_save_interval': 100,
 		'ckpt_save_path': 'checkpoint',
@@ -63,13 +63,21 @@ if __name__ == '__main__':
 
 	dataset = ReplayBuffer(**config['rl']['replay_buffer'])
 	learners = [Learner(i, [6, 7], dataset, config) for i in range(config['rl']['n_learners'])]
-	actors = [Actor(i, [2, 3, 4, 5], dataset, config) for i in range(config['actor']['n_actors'])]
+	actors = [Actor(i, [0, 2, 3, 4], dataset, config) for i in range(config['actor']['n_actors'])]
 
 	for learner in learners:
 		learner.start()
 	for actor in actors:
 		actor.start()
-	for learner in learners:
-		learner.join()
-	for actor in actors:
-		actor.join()
+	try:
+		for learner in learners:
+			learner.join()
+		for actor in actors:
+			actor.join()
+	finally:
+		for learner in learners:
+			if learner.is_alive():
+				learner.kill()
+		for actor in actors:
+			if actor.is_alive():
+				actor.kill()
