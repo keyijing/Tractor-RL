@@ -112,12 +112,12 @@ if __name__ == '__main__':
 	}
 	models = {
 		'1': Model(**conf).to(device),
-		'0': Model(**conf, pred_mask=False).to(device),
+		'0': Model(**conf).to(device),
 	}
 	for model in models.values():
 		model.eval()
-	models['1'].load_state_dict(torch.load('checkpoint/3000.pt', map_location=device))
-	models['0'].load_state_dict(torch.load('checkpoint/model_best/5800.pt', map_location=device))
+	models['1'].load_state_dict(torch.load('checkpoint/9900.pt', map_location=device))
+	models['0'].load_state_dict(torch.load('checkpoint/6500.pt', map_location=device))
 
 	# Setup Single Shared TensorBuffer
 	# Capacity: batch_size * 4 players * num_blocks * 2 (k+v)

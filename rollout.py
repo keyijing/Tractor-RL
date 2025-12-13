@@ -336,62 +336,10 @@ class Actor(Process):
 				state_dict = model_pools['best'].load_model(latest)
 				versions['best'] = latest
 				models['best'].load_state_dict(state_dict)
-			if self.rng.random() < 0.8:
+			if self.rng.random() < 0.6:
 				models['ckpt'].load_state_dict(models['best'].state_dict())
 			else:
 				version = self.rng.choice(model_pools['ckpt'].get_model_list())
 				state_dict = model_pools['ckpt'].load_model(version)
 				versions['ckpt'] = version
 				models['ckpt'].load_state_dict(state_dict)
-
-			# print(f'episode {episode} done')
-
-if __name__ == '__main__':
-	from model_pool import ModelPoolServer
-	config = {
-		'gamma': 0.99,
-		'lambda': 0.95,
-		'replay_buffer': {
-			'capacity': 2048,
-			'episode': 32,
-			'seed': 0,
-		},
-		'model': {
-			'n_toks': N_TOKENS,
-			'n_players': 4,
-			'n_actions': N_ACTIONS,
-			'd_model': 16,
-			'max_seq_len': 384,
-			'num_blocks': 1,
-			'num_heads': 1,
-		},
-		'actor': {
-			'batch_size': 32,
-			'seed': 42,
-		},
-	}
-	model1 = Model(**config['model'])
-	model2 = Model(**config['model'])
-	pool1 = ModelPoolServer(4, 'best')
-	pool2 = ModelPoolServer(4, 'avg')
-	pool1.push(model1.state_dict())
-	pool2.push(model2.state_dict())
-	dataset_best = ReplayBuffer(**config['replay_buffer'])
-	dataset_avg = ReplayBuffer(**config['replay_buffer'])
-	actor = Actor(
-		0,
-		{'best': dataset_best, 'avg': dataset_avg},
-		config
-	)
-	actor.start()
-	while True:
-		batch = dataset_best.pop(512)
-		print('dataset_best pop', batch.keys())
-		batch = dataset_avg.pop(512)
-		print('dataset_avg pop', batch.keys())
-		break
-	actor.join(timeout=20)
-	if actor.is_alive():
-		print('actor is still alive')
-		actor.kill()
-		actor.join()
