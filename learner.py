@@ -139,7 +139,7 @@ class RLLearner:
 				surr2 = torch.clip(ratio, 1 - eps, 1 + eps) * adv
 
 				pos_weight = torch.sum(action_mask, dim=-1, keepdim=True)
-				pos_weight = (n_actions - pos_weight) / pos_weight
+				pos_weight = torch.clip((n_actions - pos_weight) / pos_weight, max=10)
 
 				policy_loss = -_masked_mean(torch.min(surr1, surr2))
 				value_loss = _masked_mean(F.mse_loss(value, target, reduction='none'))

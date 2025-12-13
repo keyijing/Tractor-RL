@@ -18,7 +18,7 @@ config = {
 		'mini_batch_size': 64,
 		'epochs': 2,
 		'clip_grad': 1,
-		'ckpt_save_interval': 100,
+		'ckpt_save_interval': 200,
 		'ckpt_save_path': 'checkpoint',
 		'n_learners': 2,
 		'replay_buffer': {
@@ -44,10 +44,10 @@ config = {
 		'n_toks': N_TOKENS,
 		'n_players': 4,
 		'n_actions': N_ACTIONS,
-		'd_model': 256,
-		'max_seq_len': 384,
+		'd_model': 384,
+		'max_seq_len': 320,
 		'num_blocks': 16,
-		'num_heads': 8,
+		'num_heads': 12,
 	},
 	'actor': {
 		'n_actors': 4,
