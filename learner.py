@@ -51,7 +51,11 @@ class RLLearner:
 		self.master = dist.get_rank() == 0
 		self.world_size = dist.get_world_size()
 		self.device = f'cuda:{device_id}'
-		self.model = DDP(model.to(self.device), device_ids=[device_id])
+		model = model.to(self.device)
+		if 'load_path' in config:
+			print(f'load model from {config["load_path"]}')
+			model.load_state_dict(torch.load(config['load_path'], map_location=self.device))
+		self.model = DDP(model, device_ids=[device_id])
 		self.replay_buffer = replay_buffer
 
 		if self.master:

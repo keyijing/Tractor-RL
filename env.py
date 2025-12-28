@@ -6,10 +6,10 @@ class Env:
 	def __init__(self, seed = None):
 		self.game = Tractor(seed)
 
-	def reset(self):
+	def reset(self, level=None):
 		self.players = [Agent() for _ in range(4)]
 		self.rewards = [0 for _ in range(4)]
-		self.req = self.game.reset()
+		self.req = self.game.reset(level)
 		self.done = False
 
 		self.sum = 0

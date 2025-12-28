@@ -16,7 +16,7 @@ config = {
 		'aux_coef': 0.05,
 		'batch_size': 1024,
 		'mini_batch_size': 64,
-		'epochs': 2,
+		'epochs': 1,
 		'clip_grad': 1,
 		'ckpt_save_interval': 200,
 		'ckpt_save_path': 'checkpoint',
