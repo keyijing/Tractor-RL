@@ -8,16 +8,14 @@ class Env:
 
 	def reset(self):
 		self.players = [Agent() for _ in range(4)]
-		self.rewards = [0 for _ in range(4)]
+		self.gains = [(0, 0) for _ in range(4)] # (reward, punish)
 		self.req = self.game.reset()
 		self.done = False
-
-		self.sum = 0
 
 	def obs(self):
 		if self.req:
 			self.stage = self.req['stage']
-			self.player_id = self.req['playerpos']
+			self.player_id = int(self.req['playerpos'])
 			self.player = self.players[self.player_id]
 			self.ids = []
 
@@ -25,11 +23,12 @@ class Env:
 			self.req = None
 
 		toks, mask = self.player.obs()
-		reward = self.rewards[self.player_id]
-		self.rewards[self.player_id] = 0
+		gain = self.gains[self.player_id]
+		self.gains[self.player_id] = (0, 0)
 		return {
 			'player': self.player_id,
-			'reward': reward,
+			'reward': gain[0],
+			'punish': gain[1],
 			'toks': toks,
 			'action_mask': mask,
 		}
@@ -61,11 +60,10 @@ class Env:
 				'player': self.player_id,
 				'action': self.ids,
 			}
-			self.req, rewards, self.done = self.game.step(response)
-			for i, reward in enumerate(rewards):
-				self.rewards[i] += reward
-			# if self.done:
-			# 	print(self.rewards)
+			self.req, gains, self.done = self.game.step(response)
+			for i, (reward, punish) in enumerate(gains):
+				self.gains[i][0] += reward
+				self.gains[i][1] += punish
 			return self.done
 		else:
 			return False
