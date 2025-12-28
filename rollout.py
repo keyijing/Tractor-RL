@@ -1,5 +1,4 @@
 from model import TensorBuffer, collate_kv_cache, Model
-from agent import N_TOKENS, N_ACTIONS
 from env import Env
 from replay_buffer import ReplayBuffer
 from model_pool import ModelPoolClient
@@ -143,6 +142,7 @@ def episode_loop(
 	"""
 	gamma = config['gamma']
 	lam = config['lambda']
+	coef = config['reward_coef']
 	batch_size = len(traj_all)
 
 	# Reset Cache and Buffers
@@ -179,7 +179,7 @@ def episode_loop(
 			traj = env_trajs[pid]
 
 			# Store reward from previous action
-			traj.set_reward(obs['reward'] / 100)
+			traj.set_reward(obs['reward'] * coef['reward'] + obs['punish'] * coef['punish'])
 
 			# Add to specific model bucket
 			group = batches[mid]
@@ -243,8 +243,8 @@ def episode_loop(
 	# Since the loop breaks when env.step returns Done, the last reward 
 	# hasn't been observed via env.obs().
 	for env, trajs in zip(envs, traj_all):
-		for reward, final_score, traj in zip(env.rewards, env.game.final_scores, trajs):
-			traj.set_reward(reward / 100 + final_score)
+		for (reward, punish), final_score, traj in zip(env.gains, env.game.final_scores, trajs):
+			traj.set_reward(reward * coef['reward'] + punish * coef['punish'] + final_score * coef['final'])
 
 	# GAE Calculation
 	for np_buffer in np_buffers.values():

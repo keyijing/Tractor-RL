@@ -9,6 +9,11 @@ config = {
 	'gamma': 0.99,
 	'lambda': 0.95,
 	'log': 'wandb',
+	'reward_coef': {
+		'reward': 0.05,
+		'punish': 0.0,
+		'final': 0.0,
+	},
 	'rl': {
 		'eps': 0.2,
 		'value_coef': 0.5,

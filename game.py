@@ -41,7 +41,7 @@ class Tractor():
 		self.score = 0
 		self.history = []
 		self.played_cards = [[] for _ in range(4)]
-		self.reward = [0 for _ in range(4)]
+		self.gain = [(0, 0) for _ in range(4)] # (reward, punish)
 		self.done = False
 		self.round = 0 # 轮次计数器
 
@@ -51,7 +51,7 @@ class Tractor():
 
 	def step(self, response): #response: dict{'player': player_id, 'action': action}
 		# Each step receives a response and provides an obs
-		self.reward = [0 for _ in range(4)]
+		self.gain = [(0, 0) for _ in range(4)]
 		curr_player = response['player']
 		action = response['action']
 		if type(action) is not list:
@@ -117,7 +117,7 @@ class Tractor():
 					self.done = True
 		self.round += 1
 
-		return self._get_request(next_player), self.reward, self.done
+		return self._get_request(next_player), self.gain, self.done
 
 
 	def _raise_error(self, player, info):
@@ -867,16 +867,16 @@ class Tractor():
 			self.score += points
 		for i in range(4):
 			if (i-player) % 2 == 0:
-				self.reward[i] += points
+				self.gain[i][0] += points
 			else:
-				self.reward[i] -= points
+				self.gain[i][0] -= points
 
 	def _punish(self, player, points):
 		if (player-self.banker_pos) % 2 != 0:
 			self.score -= points
 		else:
 			self.score += points
-		self.reward[player] -= points
+		self.gain[player][1] -= points
 
 	@property
 	def final_scores(self):

@@ -28,6 +28,7 @@ model = Model(
 data_dir = '/data/Tractor/model.pt'
 model.load_state_dict(torch.load(data_dir, map_location=device))
 model.to(device)
+model.eval()
 
 player = Agent()
 his_toks = []
