@@ -20,10 +20,10 @@ model = Model(
 	n_toks=N_TOKENS,
 	n_players=4,
 	n_actions=N_ACTIONS,
-	d_model=256,
-	max_seq_len=384,
+	d_model=384,
+	max_seq_len=320,
 	num_blocks=16,
-	num_heads=8,
+	num_heads=12,
 )
 data_dir = '/data/Tractor/model.pt'
 model.load_state_dict(torch.load(data_dir, map_location=device))
