@@ -8,7 +8,7 @@ class Env:
 
 	def reset(self, level=None):
 		self.players = [Agent() for _ in range(4)]
-		self.gains = [(0, 0) for _ in range(4)] # (reward, punish)
+		self.gains = [[0, 0] for _ in range(4)] # (reward, punish)
 		self.req = self.game.reset(level)
 		self.done = False
 
@@ -24,7 +24,7 @@ class Env:
 
 		toks, mask = self.player.obs()
 		gain = self.gains[self.player_id]
-		self.gains[self.player_id] = (0, 0)
+		self.gains[self.player_id] = [0, 0]
 		return {
 			'player': self.player_id,
 			'reward': gain[0],
