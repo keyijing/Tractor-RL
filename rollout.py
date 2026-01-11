@@ -155,7 +155,7 @@ def episode_loop(
 		np_buffer['actions'].zero_()
 		np_buffer['output_mask'].zero_()
 	for env in envs:
-		env.reset()
+		env.reset(config.get('level'))
 	done_cnt = 0
 
 	while done_cnt < batch_size:

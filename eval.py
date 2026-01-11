@@ -4,17 +4,18 @@ from env import Env
 from collections import defaultdict
 import numpy as np
 import torch
+import sys
 
 def eval_models(
 	models: dict[str, Model],
 	model_ids: list[str],
 	envs: list[Env],
-	tensor_buffer: TensorBuffer,
+	tensor_buffers: dict[str, TensorBuffer],
 	device,
 ):
 	batch_size = len(envs)
 	kv_caches = [
-		[models[mid].transformer.create_kv_cache(tensor_buffer) for mid in model_ids]
+		[models[mid].transformer.create_kv_cache(tensor_buffers[mid]) for mid in model_ids]
 		for _ in range(batch_size)
 	]
 	for env in envs:
@@ -98,33 +99,31 @@ def eval_models(
 if __name__ == '__main__':
 	seed = 10
 	batch_size = 128
-	device = 'cuda:5'
+	device, model1, model2 = f'cuda:{int(sys.argv[3])}', sys.argv[1], sys.argv[2]
 
 	# Load models
 	conf = {
 		'n_toks': N_TOKENS,
 		'n_players': 4,
 		'n_actions': N_ACTIONS,
-		'd_model': 256,
-		'max_seq_len': 384,
 		'num_blocks': 16,
-		'num_heads': 8,
 	}
 	models = {
-		'1': Model(**conf).to(device),
-		'0': Model(**conf).to(device),
+		'0': Model(**conf, d_model=384, max_seq_len=320, num_heads=12).to(device),
+		'1': Model(**conf, d_model=384, max_seq_len=320, num_heads=12).to(device),
 	}
 	for model in models.values():
 		model.eval()
-	models['1'].load_state_dict(torch.load('checkpoint/9900.pt', map_location=device))
-	models['0'].load_state_dict(torch.load('checkpoint/6500.pt', map_location=device))
+	models['0'].load_state_dict(torch.load(f'checkpoint/{model1}.pt', map_location=device))
+	models['1'].load_state_dict(torch.load(f'checkpoint/{model2}.pt', map_location=device))
 
 	# Setup Single Shared TensorBuffer
 	# Capacity: batch_size * 4 players * num_blocks * 2 (k+v)
 	# We use ref_model for shape/config since all models are the same type.
-	ref_model = next(iter(models.values()))
-	capacity = batch_size * 4 * ref_model.transformer.num_blocks * 2
-	tensor_buffer = TensorBuffer(capacity, ref_model.transformer.cache_shape, device=device)
+	tensor_buffers = {
+		k: TensorBuffer(batch_size * 2 * model.transformer.num_blocks * 2, model.transformer.cache_shape, device=device)
+		for k, model in models.items()
+	}
 
 	# Create envs
 	envs = [Env(seed + i) for i in range(batch_size)]
@@ -132,7 +131,7 @@ if __name__ == '__main__':
 	scores_tot = [0 for _ in range(4)]
 	for _ in range(16):
 		print(_)
-		scores = eval_models(models, ['0', '1', '0', '1'], envs, tensor_buffer, device)
+		scores = eval_models(models, ['0', '1', '0', '1'], envs, tensor_buffers, device)
 		for i in range(4):
 			scores_tot[i] += scores[i] / 16
 	print(scores_tot)

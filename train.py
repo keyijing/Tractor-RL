@@ -8,11 +8,12 @@ import multiprocessing as mp
 config = {
 	'gamma': 0.99,
 	'lambda': 0.95,
-	'log': 'wandb',
+	# 'log': 'wandb',
+	# 'level': '2',
 	'reward_coef': {
-		'reward': 0.05,
-		'punish': 0.0,
-		'final': 0.0,
+		'reward': 0.01,
+		'punish': 0.01,
+		'final': 1.0,
 	},
 	'rl': {
 		'eps': 0.2,
@@ -27,7 +28,7 @@ config = {
 		'ckpt_save_path': 'checkpoint',
 		'n_learners': 2,
 		'replay_buffer': {
-			'capacity': 1536,
+			'capacity': 1024,
 			'episode': 64,
 			'seed': 0,
 		},
