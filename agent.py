@@ -12,7 +12,7 @@ class Stage(Enum):
 
 CARD_TOK  = 0    #   0 ~ 53  (54)
 PLAY_OUT  = 54   #  54 ~ 163 (108 + 2)
-SCORE_TOK = 164  # 164 ~ 170 (0 ~ 2, 3, 4 ~ 7, 8, 9 ~ 10, 11, 12)
+LEVEL_TOK = 164  # 164 ~ 170 (0 ~ 2, 3, 4 ~ 7, 8, 9 ~ 10, 11, 12)
 MAJOR_TOK = 171  # 171 ~ 175 (4 + 1)
 COVER_TOK = 176
 TRICK_TOK = 177
@@ -84,7 +84,7 @@ class Agent:
 			level = glob['level']
 			self.level = NUMBER_TO_ID[level]
 
-			self.toks.append((SCORE_TOK + (
+			self.toks.append((LEVEL_TOK + (
 				0 if self.level <= 2 else
 				1 if self.level == 3 else
 				2 if self.level <= 7 else
