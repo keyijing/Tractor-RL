@@ -1,4 +1,4 @@
-import sys, os
+import sys
 sys.path.append('/data/Tractor')
 
 from agent import N_TOKENS, N_ACTIONS, Stage, Agent
@@ -6,13 +6,6 @@ from model import Model
 import numpy as np
 import torch
 import json
-
-_online = os.environ.get("USER", "") == "root"
-if _online:
-	full_input: dict = json.loads(input())
-else:
-	with open("log_forAI.json") as f:
-		full_input: dict = json.load(f)
 
 # loading model
 device = 'cpu'
@@ -32,18 +25,8 @@ model.eval()
 
 player = Agent()
 his_toks = []
-res_toks: list = full_input.get('data', [])
-cur_toks = res_toks
 
 def policy(toks: list, action_mask: np.ndarray):
-	global res_toks
-	global cur_toks
-
-	if cur_toks:
-		tok = cur_toks[0]
-		cur_toks = cur_toks[1:]
-		return tok
-
 	toks_tensor = torch.tensor(toks, dtype=torch.int64, device=device).unsqueeze(dim=0)
 	action_mask_tensor = torch.from_numpy(action_mask).to(device).unsqueeze(dim=0)
 	output = model.get_action_and_value(
@@ -51,13 +34,17 @@ def policy(toks: list, action_mask: np.ndarray):
 		id_toks=toks_tensor[..., 1],
 		action_mask=action_mask_tensor,
 		valid_lengths=[len(toks)],
-		deterministic=True,
 	)
 	tok = output['actions'][0].item()
-	res_toks.append(tok)
 	return tok
 
-for req in full_input['requests']:
+first_round = True
+
+while True:
+	req = json.loads(input())
+	if first_round:
+		req = req['requests'][0]
+		first_round = False
 	player.observe(req)
 
 	if player.stage == Stage.DEAL:
@@ -87,8 +74,7 @@ for req in full_input['requests']:
 				break
 			else:
 				ids += new_ids
-
-print(json.dumps({
-	'response': ids,
-	'data': res_toks,
-}))
+	
+	print(json.dumps({'response': ids}))
+	print('>>>BOTZONE_REQUEST_KEEP_RUNNING<<<')
+	sys.stdout.flush()
