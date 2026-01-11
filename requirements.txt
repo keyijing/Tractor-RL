@@ -1,0 +1,4 @@
+numpy==2.3.4
+torch==2.6.0+cu124
+pybind11==3.0.1
+wandb==0.23.0
