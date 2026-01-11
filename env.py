@@ -1,5 +1,4 @@
 from agent import Agent
-from policy import random_policy
 from game import Tractor
 
 class Env:
@@ -67,14 +66,3 @@ class Env:
 			return self.done
 		else:
 			return False
-
-if __name__ == '__main__':
-	env = Env()
-	while True:
-		env.reset()
-		while True:
-			obs = env.obs()
-			tok = random_policy(obs['action_mask'])
-			done = env.step(tok)
-			if done:
-				break
