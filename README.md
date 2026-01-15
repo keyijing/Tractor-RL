@@ -1,10 +1,10 @@
-# Generative RL for Tractor
+# Generative RL for Tractor (双升游戏 AI)
 
-This is the term project for Reinforcement Learning course in Peking University (2025 Fall). The project presents a generative reinforcement learning approach for the card game Tractor.
+This is the term project for Reinforcement Learning course in Peking University (2025 Fall). This project presents a generative reinforcement learning approach for the card game Tractor ([双升](https://www.botzone.org.cn/game/Tractor)).
 
 ## Project Report
 
-See the [project report](report.pdf) for the details of the project.
+See the [project report](report.pdf) for the details.
 
 ## Building and Running
 
